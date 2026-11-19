@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "optcg-knowledge"
+version = "0.1.0"
+description = "One Piece Card Game (OPTCG) knowledge base and MCP server for rules, cards, FAQs, and judge rulings"
+readme = "PROMPT.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx>=0.28.0",
+    "pymupdf>=1.25.0",
+    "sqlite-vec>=0.1.6",
+]
+
+[project.optional-dependencies]
+embeddings = [
+    "sentence-transformers>=3.0.0",
+]
+
+[project.scripts]
+optcg-ingest = "optcg_knowledge.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
+]
+
+[tool.uv]
+python-preference = "only-managed"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/optcg_knowledge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "T201"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/optcg_knowledge/cli.py" = ["T201"]
