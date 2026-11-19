@@ -92,22 +92,41 @@ def test_punk_records_source_offline_with_mock_transport(fixtures_dir: Path) -> 
         (fixtures_dir / "sample_cards_punk_records.json").read_text(encoding="utf-8")
     )
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    # Verify v2.0 layout: dict packs.json + data/{pack_id}.json.
+    def handler_v2(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/packs.json"):
-            return httpx.Response(200, json=[{"id": "OP05"}, {"id": "MISSING"}])
-        if request.url.path.endswith("/cards/OP05.json"):
+            return httpx.Response(
+                200,
+                json={
+                    "569105": {"id": "569105", "raw_title": "BOOSTER PACK [OP-05]"},
+                    "999999": {"id": "999999", "raw_title": "MISSING"},
+                },
+            )
+        if request.url.path.endswith("/data/569105.json"):
             return httpx.Response(200, json=sample_cards)
         return httpx.Response(404)
 
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport) as client:
+    with httpx.Client(transport=httpx.MockTransport(handler_v2)) as client:
         source = PunkRecordsSource(
             base_url="https://example.invalid/punk-records/english",
             client=client,
         )
-        raw_cards = source.fetch_raw_cards()
+        assert len(source.fetch_raw_cards()) == 6
 
-    assert len(raw_cards) == 6
+    # Verify legacy layout fallback: list packs.json + cards/{pack_id}.json.
+    def handler_v1(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/packs.json"):
+            return httpx.Response(200, json=[{"id": "OP05"}])
+        if request.url.path.endswith("/cards/OP05.json"):
+            return httpx.Response(200, json=sample_cards)
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(handler_v1)) as client:
+        source_v1 = PunkRecordsSource(
+            base_url="https://example.invalid/punk-records/english",
+            client=client,
+        )
+        assert len(source_v1.fetch_raw_cards()) == 6
 
 
 def test_ingest_cards_chunks_and_idempotency(

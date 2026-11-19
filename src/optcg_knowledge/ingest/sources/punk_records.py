@@ -44,14 +44,39 @@ class PunkRecordsSource:
 
         packs_url = f"{self._base_url}/packs.json"
         packs_payload = self._fetch_json(client, packs_url)
-        if not isinstance(packs_payload, list):
-            raise ValueError(f"Expected JSON list from {packs_url}")
 
         pack_ids: list[str] = []
-        for entry in packs_payload:
-            if isinstance(entry, dict) and entry.get("id"):
-                pack_ids.append(str(entry["id"]))
-        return pack_ids
+        if isinstance(packs_payload, dict):
+            for key, entry in packs_payload.items():
+                if isinstance(entry, dict) and entry.get("id"):
+                    pack_ids.append(str(entry["id"]))
+                else:
+                    pack_ids.append(str(key))
+        elif isinstance(packs_payload, list):
+            for entry in packs_payload:
+                if isinstance(entry, dict) and entry.get("id"):
+                    pack_ids.append(str(entry["id"]))
+        else:
+            raise ValueError(f"Expected JSON object or list from {packs_url}")
+
+        return sorted(dict.fromkeys(pack_ids))
+
+    def _fetch_pack_cards(self, client: httpx.Client, pack_id: str) -> Any | None:
+        # punk-records v2.0 stores per-pack arrays under data/{pack_id}.json;
+        # older layouts store them under cards/{pack_id}.json.
+        candidate_urls = (
+            f"{self._base_url}/data/{pack_id}.json",
+            f"{self._base_url}/cards/{pack_id}.json",
+        )
+        for pack_url in candidate_urls:
+            try:
+                return self._fetch_json(client, pack_url)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    continue
+                raise
+        logger.warning("Pack file not found (404), skipping pack_id=%s", pack_id)
+        return None
 
     def fetch_raw_cards(self) -> list[dict[str, Any]]:
         owns_client = self._client is None
@@ -60,18 +85,13 @@ class PunkRecordsSource:
             pack_ids = self._resolve_pack_ids(client)
             cards: list[dict[str, Any]] = []
             for pack_id in pack_ids:
-                pack_url = f"{self._base_url}/cards/{pack_id}.json"
-                try:
-                    payload = self._fetch_json(client, pack_url)
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 404:
-                        logger.warning("Pack file not found (404), skipping: %s", pack_url)
-                        continue
-                    raise
+                payload = self._fetch_pack_cards(client, pack_id)
+                if payload is None:
+                    continue
                 if isinstance(payload, list):
                     cards.extend(item for item in payload if isinstance(item, dict))
                 else:
-                    logger.warning("Unexpected payload type from %s; skipping", pack_url)
+                    logger.warning("Unexpected payload type for pack_id=%s; skipping", pack_id)
             return cards
         except httpx.HTTPError as exc:
             raise RuntimeError(
