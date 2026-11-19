@@ -1,0 +1,35 @@
+# Python / uv / tooling
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets & environment
+.env
+.env.*
+!.env.example
+
+# Raw data (judge chats with PII, Bandai PDFs, manual dumps)
+data/raw/**
+!data/raw/
+!data/raw/**/
+!data/raw/**/.gitkeep
+
+# Generated SQLite databases and WAL files
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# Local agent / security / graph artifacts
+graphify-out/
+security-reports/
