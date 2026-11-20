@@ -14,12 +14,15 @@ _CARD_ID_RE = re.compile(
 # Matches hierarchical Comprehensive Rules IDs: 7-1-4, 7-1-4-1, 10-2-1-3-1
 _RULE_ID_RE = re.compile(r"\b\d+(?:-\d+){1,4}\b")
 
+# Matches canonical Tournament Rules Manual section IDs: TRM-1.0, TRM-7.4.1, TRM-7.4.1.2
+_TRM_ID_RE = re.compile(r"\bTRM-\d+(?:\.\d+)+\b", re.IGNORECASE)
+
 # Matches bracketed OPTCG keywords/triggers: [Blocker], [On K.O.], [DON!! x1], [Activate: Main]
 _BRACKET_KEYWORD_RE = re.compile(r"\[([^\[\]]+)\]")
 
-# Tokenizes query fragments for safe FTS5 quoting while keeping bracketed phrases & hyphenated IDs.
+# Tokenizes query fragments for safe FTS5 quoting while keeping bracketed phrases & structured IDs.
 _FTS_TOKEN_RE = re.compile(
-    r"\[[^\[\]]+\]|[^\W_]+(?:-[^\W_]+)+|[^\W_]+",
+    r"\[[^\[\]]+\]|[^\W_]+(?:[-.][^\W_]+)+|[^\W_]+",
     re.UNICODE,
 )
 
@@ -30,16 +33,18 @@ class DetectedTokens:
 
     card_ids: tuple[str, ...] = ()
     rule_ids: tuple[str, ...] = ()
+    trm_ids: tuple[str, ...] = ()
     keywords: tuple[str, ...] = ()
 
     @property
     def has_any(self) -> bool:
-        return bool(self.card_ids or self.rule_ids or self.keywords)
+        return bool(self.card_ids or self.rule_ids or self.trm_ids or self.keywords)
 
     def to_dict(self) -> dict[str, list[str]]:
         return {
             "card_ids": list(self.card_ids),
             "rule_ids": list(self.rule_ids),
+            "trm_ids": list(self.trm_ids),
             "keywords": list(self.keywords),
         }
 
@@ -59,11 +64,23 @@ def detect_query_tokens(query: str) -> DetectedTokens:
             seen_cards.add(normalized)
             card_ids.append(normalized)
 
+    trm_ids: list[str] = []
+    seen_trm: set[str] = set()
+    trm_spans: list[tuple[int, int]] = []
+    for match in _TRM_ID_RE.finditer(query):
+        normalized_trm = match.group(0).upper()
+        trm_spans.append(match.span())
+        if normalized_trm not in seen_trm:
+            seen_trm.add(normalized_trm)
+            trm_ids.append(normalized_trm)
+
     rule_ids: list[str] = []
     seen_rules: set[str] = set()
     for match in _RULE_ID_RE.finditer(query):
         start, end = match.span()
         if any(start >= cs and end <= ce for cs, ce in card_spans):
+            continue
+        if any(start >= ts and end <= te for ts, te in trm_spans):
             continue
         rule_id = match.group(0)
         if rule_id not in seen_rules:
@@ -85,6 +102,7 @@ def detect_query_tokens(query: str) -> DetectedTokens:
     return DetectedTokens(
         card_ids=tuple(card_ids),
         rule_ids=tuple(rule_ids),
+        trm_ids=tuple(trm_ids),
         keywords=tuple(keywords),
     )
 

@@ -27,6 +27,7 @@ from optcg_knowledge.ingest.official_downloader import (
 )
 from optcg_knowledge.ingest.rules_parser import ingest_rules, parse_rules_pdf
 from optcg_knowledge.ingest.sources import CardSource, LocalCardSource, PunkRecordsSource
+from optcg_knowledge.ingest.trm_parser import ingest_trm, parse_trm_pdf
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -79,11 +80,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     fetch_parser = subparsers.add_parser(
         "fetch-official",
-        help="Download official Bandai Comprehensive Rules PDF, FAQ PDFs, and errata HTML.",
+        help=(
+            "Download official Bandai Comprehensive Rules PDF, Tournament Rules Manual PDF, "
+            "FAQ PDFs, and errata HTML."
+        ),
     )
     fetch_parser.add_argument(
         "--only",
-        choices=("all", "rules", "faq", "errata"),
+        choices=("all", "rules", "trm", "faq", "errata"),
         default="all",
         help="Download only a subset of official documents (default: all).",
     )
@@ -123,6 +127,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "--effective-date",
         default=None,
         help="Override detected effective date (e.g., 2025-09-01).",
+    )
+
+    trm_parser = subparsers.add_parser(
+        "trm",
+        help="Parse and ingest an official Bandai Tournament Rules Manual (TRM) PDF.",
+    )
+    trm_parser.add_argument(
+        "pdf",
+        nargs="?",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the Tournament Rules Manual PDF "
+            "(defaults to data/raw/rules/tournament_rules_manual.pdf)."
+        ),
+    )
+    trm_parser.add_argument(
+        "--version",
+        dest="trm_version",
+        default=None,
+        help="Override detected Tournament Rules Manual version (optional).",
+    )
+    trm_parser.add_argument(
+        "--effective-date",
+        default=None,
+        help="Override detected Last Updated / effective date (e.g., October 17, 2025).",
     )
 
     cards_parser = subparsers.add_parser(
@@ -328,7 +358,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"Fetched official Bandai docs into {summary.out_dir} "
             f"(downloaded={summary.downloaded}, skipped={summary.skipped}, "
-            f"rules={summary.rules_files}, faq={summary.faq_files}, errata={summary.errata_files})"
+            f"rules={summary.rules_files}, trm={summary.trm_files}, "
+            f"faq={summary.faq_files}, errata={summary.errata_files})"
         )
         return 0
 
@@ -350,6 +381,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"(removed={summary.rules_removed}, chunks={summary.chunks_upserted}, "
             f"version={summary.rules_version or 'unknown'}, "
             f"effective_date={summary.effective_date or 'unknown'})"
+        )
+        return 0
+
+    if args.command == "trm":
+        trm_pdf = args.pdf or (settings.raw_data_dir / "rules" / "tournament_rules_manual.pdf")
+        trm_doc = parse_trm_pdf(
+            trm_pdf,
+            trm_version=args.trm_version,
+            effective_date=args.effective_date,
+        )
+        with open_db(
+            settings.db_path,
+            init=True,
+            embedding_model=settings.embedding_model,
+            embedding_dim=settings.embedding_dim,
+        ) as conn:
+            trm_summary = ingest_trm(conn, trm_doc)
+        print(
+            f"Ingested {trm_summary.sections_upserted} TRM sections "
+            f"(removed={trm_summary.sections_removed}, chunks={trm_summary.chunks_upserted}, "
+            f"version={trm_summary.trm_version or 'unknown'}, "
+            f"effective_date={trm_summary.effective_date or 'unknown'})"
         )
         return 0
 

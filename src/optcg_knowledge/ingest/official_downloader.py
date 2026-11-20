@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_OFFICIAL_BASE_URL = "https://en.onepiece-cardgame.com"
 DEFAULT_USER_AGENT = "optcg-knowledge/0.1 (+https://github.com/IcaroMouraDEV/optcg-knowledge-mcp)"
 
-FetchTarget = Literal["all", "rules", "faq", "errata"]
+FetchTarget = Literal["all", "rules", "trm", "faq", "errata"]
 
 _PDF_HREF_RE = re.compile(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.IGNORECASE)
 _MANIFEST_FILENAME = ".official_manifest.json"
@@ -29,7 +29,7 @@ _MANIFEST_FILENAME = ".official_manifest.json"
 
 @dataclass(frozen=True, slots=True)
 class OfficialFetchSummary:
-    """Counters returned after fetching official Bandai rules, FAQs, and errata."""
+    """Counters returned after fetching official Bandai rules, TRM, FAQs, and errata."""
 
     downloaded: int
     skipped: int
@@ -37,6 +37,7 @@ class OfficialFetchSummary:
     faq_files: int
     errata_files: int
     out_dir: Path
+    trm_files: int = 0
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, str]:
@@ -126,8 +127,10 @@ def fetch_official_docs(
     Files are saved into ``<out_dir>/rules/`` and ``<out_dir>/faq/`` with revision
     tracking in ``<out_dir>/.official_manifest.json`` so re-runs skip unchanged files.
     """
-    if only not in ("all", "rules", "faq", "errata"):
-        raise ValueError(f"Unsupported target {only!r}; expected one of: all, rules, faq, errata")
+    if only not in ("all", "rules", "trm", "faq", "errata"):
+        raise ValueError(
+            f"Unsupported target {only!r}; expected one of: all, rules, trm, faq, errata"
+        )
 
     target_root = Path(out_dir)
     rules_dir = target_root / "rules"
@@ -141,6 +144,7 @@ def fetch_official_docs(
     downloaded = 0
     skipped = 0
     rules_files = 0
+    trm_files = 0
     faq_files = 0
     errata_files = 0
 
@@ -152,9 +156,9 @@ def fetch_official_docs(
     )
 
     try:
-        if only in ("all", "rules"):
+        if only in ("all", "rules", "trm"):
             rules_page_url = f"{normalized_base}/rules/"
-            logger.info("Checking Comprehensive Rules link at %s", rules_page_url)
+            logger.info("Checking official rules & TRM links at %s", rules_page_url)
             resp = active_client.get(rules_page_url)
             resp.raise_for_status()
             pdf_urls = _extract_same_host_pdf_links(
@@ -162,31 +166,60 @@ def fetch_official_docs(
                 page_url=rules_page_url,
                 allowed_host=allowed_host,
             )
-            comp_urls = [
-                u
-                for u in pdf_urls
-                if "rule_comprehensive" in Path(urlparse(u).path).name.lower()
-            ]
-            if not comp_urls:
-                raise RuntimeError(
-                    f"Could not find rule_comprehensive*.pdf link on {rules_page_url}"
-                )
-            comp_url = comp_urls[0]
-            dest = rules_dir / "rule_comprehensive.pdf"
-            if _download_pdf_if_needed(
-                active_client,
-                url=comp_url,
-                dest=dest,
-                manifest_key="rules/rule_comprehensive.pdf",
-                manifest=manifest,
-                force=force,
-            ):
-                downloaded += 1
-                logger.info("Downloaded %s", dest)
-            else:
-                skipped += 1
-                logger.info("Up-to-date (skipped): %s", dest)
-            rules_files = 1
+
+            if only in ("all", "rules"):
+                comp_urls = [
+                    u
+                    for u in pdf_urls
+                    if "rule_comprehensive" in Path(urlparse(u).path).name.lower()
+                ]
+                if not comp_urls:
+                    raise RuntimeError(
+                        f"Could not find rule_comprehensive*.pdf link on {rules_page_url}"
+                    )
+                comp_url = comp_urls[0]
+                dest = rules_dir / "rule_comprehensive.pdf"
+                if _download_pdf_if_needed(
+                    active_client,
+                    url=comp_url,
+                    dest=dest,
+                    manifest_key="rules/rule_comprehensive.pdf",
+                    manifest=manifest,
+                    force=force,
+                ):
+                    downloaded += 1
+                    logger.info("Downloaded %s", dest)
+                else:
+                    skipped += 1
+                    logger.info("Up-to-date (skipped): %s", dest)
+                rules_files = 1
+
+            if only in ("all", "trm"):
+                trm_urls = [
+                    u
+                    for u in pdf_urls
+                    if "tournament_rules_manual" in Path(urlparse(u).path).name.lower()
+                ]
+                if not trm_urls:
+                    raise RuntimeError(
+                        f"Could not find tournament_rules_manual*.pdf link on {rules_page_url}"
+                    )
+                trm_url = trm_urls[0]
+                dest = rules_dir / "tournament_rules_manual.pdf"
+                if _download_pdf_if_needed(
+                    active_client,
+                    url=trm_url,
+                    dest=dest,
+                    manifest_key="rules/tournament_rules_manual.pdf",
+                    manifest=manifest,
+                    force=force,
+                ):
+                    downloaded += 1
+                    logger.info("Downloaded %s", dest)
+                else:
+                    skipped += 1
+                    logger.info("Up-to-date (skipped): %s", dest)
+                trm_files = 1
 
         if only in ("all", "faq"):
             faq_page_url = f"{normalized_base}/rules/faq/"
@@ -257,4 +290,5 @@ def fetch_official_docs(
         faq_files=faq_files,
         errata_files=errata_files,
         out_dir=target_root,
+        trm_files=trm_files,
     )

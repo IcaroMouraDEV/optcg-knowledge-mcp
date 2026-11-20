@@ -7,7 +7,13 @@ import json
 import sqlite3
 from collections.abc import Iterable, Mapping
 
-from optcg_knowledge.db.models import CardRecord, ChunkRecord, RuleRecord, RulingRecord
+from optcg_knowledge.db.models import (
+    CardRecord,
+    ChunkRecord,
+    RuleRecord,
+    RulingRecord,
+    TrmSectionRecord,
+)
 
 MAX_ANCESTOR_CHARS = 240
 
@@ -69,6 +75,54 @@ def build_rule_chunk(
             "section": rule.section,
             "rules_version": rule.rules_version,
             "effective_date": rule.effective_date,
+        },
+        content_hash=compute_content_hash(text),
+    )
+
+
+def build_trm_chunk(
+    section: TrmSectionRecord,
+    sections_by_id: Mapping[str, TrmSectionRecord],
+) -> ChunkRecord:
+    """Build one chunk per TRM section, prepending the ancestor breadcrumb for context."""
+    ancestors: list[TrmSectionRecord] = []
+    seen: set[str] = {section.section_id}
+    cursor = section.parent_id
+    while cursor is not None and cursor not in seen:
+        parent = sections_by_id.get(cursor)
+        if parent is None:
+            break
+        ancestors.append(parent)
+        seen.add(cursor)
+        cursor = parent.parent_id
+
+    ancestors.reverse()
+
+    lines: list[str] = ["[TOURNAMENT RULES MANUAL]"]
+    if ancestors:
+        path = " > ".join(
+            f"{anc.section_id} {_truncate(anc.title)}" for anc in ancestors
+        )
+        lines.append(path)
+    lines.append(f"{section.section_id} {section.title}")
+    if section.text:
+        lines.append(section.text)
+    text = "\n".join(lines)
+
+    return ChunkRecord(
+        chunk_id=f"trm:{section.section_id}",
+        doc_type="tournament_rule",
+        doc_id=section.section_id,
+        text=text,
+        authority=1,
+        metadata={
+            "section_id": section.section_id,
+            "parent_id": section.parent_id,
+            "section": section.section,
+            "title": section.title,
+            "source": "tournament_rules",
+            "trm_version": section.trm_version,
+            "effective_date": section.effective_date,
         },
         content_hash=compute_content_hash(text),
     )

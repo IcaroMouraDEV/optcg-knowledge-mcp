@@ -20,7 +20,7 @@ from optcg_knowledge.search.query_parser import (
 
 logger = logging.getLogger(__name__)
 
-VALID_DOC_TYPES = frozenset({"rule", "ruling", "card"})
+VALID_DOC_TYPES = frozenset({"rule", "ruling", "card", "tournament_rule"})
 
 RRF_K = 60
 EXACT_DOC_ID_BOOST = 0.12
@@ -140,6 +140,14 @@ def _row_to_candidate(row: sqlite3.Row) -> _Candidate:
             metadata["judge_tier"] = ruling_judge_tier
     elif doc_type == "rule":
         source = "rules"
+        superseded_by = None
+        ruling_date = None
+        ruling_rules_version = None
+        ruling_reviewed = None
+        ruling_url = None
+        ruling_judge_tier = None
+    elif doc_type == "tournament_rule":
+        source = str(metadata.get("source") or "tournament_rules")
         superseded_by = None
         ruling_date = None
         ruling_rules_version = None
@@ -302,6 +310,49 @@ def _collect_exact_matches(
             cand = _register_candidate(candidates, row)
             cand.exact_boost = max(cand.exact_boost, EXACT_LINKED_RULING_BOOST)
             cand.add_signal("exact_rule_ruling")
+
+    if tokens.trm_ids:
+        placeholders = ", ".join("?" for _ in tokens.trm_ids)
+        exact_trm_rows = conn.execute(
+            f"""
+            {_BASE_SELECT}
+            WHERE c.doc_type = 'tournament_rule'
+              AND UPPER(c.doc_id) IN ({placeholders})
+              AND ({filter_sql})
+            """,
+            [*tokens.trm_ids, *filter_params],
+        ).fetchall()
+        for row in exact_trm_rows:
+            cand = _register_candidate(candidates, row)
+            cand.exact_boost = max(cand.exact_boost, EXACT_DOC_ID_BOOST)
+            cand.add_signal("exact_trm_id")
+
+        prefix_clauses = " OR ".join("UPPER(c.doc_id) LIKE ?" for _ in tokens.trm_ids)
+        prefix_params: list[str] = []
+        for tid in tokens.trm_ids:
+            raw_num = tid[4:] if tid.startswith("TRM-") else tid
+            parts = raw_num.split(".")
+            if len(parts) == 2 and parts[1] == "0":
+                prefix_params.append(f"TRM-{parts[0]}.%")
+            else:
+                prefix_params.append(f"{tid}.%")
+
+        prefix_trm_rows = conn.execute(
+            f"""
+            {_BASE_SELECT}
+            WHERE c.doc_type = 'tournament_rule'
+              AND UPPER(c.doc_id) NOT IN ({placeholders})
+              AND ({prefix_clauses})
+              AND ({filter_sql})
+            ORDER BY c.doc_id
+            LIMIT ?
+            """,
+            [*tokens.trm_ids, *prefix_params, *filter_params, keyword_limit],
+        ).fetchall()
+        for row in prefix_trm_rows:
+            cand = _register_candidate(candidates, row)
+            cand.exact_boost = max(cand.exact_boost, EXACT_RULE_PREFIX_BOOST)
+            cand.add_signal("exact_trm_prefix")
 
     if tokens.keywords:
         keyword_hits: dict[int, int] = {}
@@ -505,7 +556,7 @@ def hybrid_search(
         query: Free-text or structured OPTCG query.
         embedder: Optional local embedder for vector retrieval (falls back to lexical if absent).
         k: Maximum number of results to return (default 8).
-        doc_types: Optional subset of ``("rule", "ruling", "card")``.
+        doc_types: Optional subset of ``("rule", "ruling", "card", "tournament_rule")``.
         min_authority: Minimum authority strength (1=rules only, 2=rules+official_faq/errata,
             3=+judge, 4=all). Filters ``authority <= min_authority``.
         include_superseded: Whether to include rulings with ``superseded_by IS NOT NULL``.

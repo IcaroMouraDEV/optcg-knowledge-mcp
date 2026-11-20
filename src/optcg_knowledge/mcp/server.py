@@ -41,6 +41,9 @@ from optcg_knowledge.search.queries import (
     get_rule as query_get_rule,
 )
 from optcg_knowledge.search.queries import (
+    get_trm_section as query_get_trm_section,
+)
+from optcg_knowledge.search.queries import (
     search_cards as query_search_cards,
 )
 
@@ -176,19 +179,22 @@ def create_server(
         name="optcg-knowledge",
         instructions=(
             "One Piece Card Game (OPTCG) knowledge base exposing Comprehensive Rules, "
-            "canonical cards, official FAQs/errata, and judge rulings with hybrid search. "
-            "Authority hierarchy: 1=rules > 2=official_faq/errata > 3=judge > 4=community."
+            "Tournament Rules Manual (TRM), canonical cards, official FAQs/errata, and judge "
+            "rulings with hybrid search. Authority hierarchy: 1=rules/tournament_rules > "
+            "2=official_faq/errata > 3=judge > 4=community."
         ),
     )
 
     @server.tool(
         name="search",
         description=(
-            "Hybrid search across OPTCG Comprehensive Rules, cards, FAQs, and judge rulings "
-            "using exact-match OPTCG token detection (card IDs, rule numbers, [Keywords]), "
-            "FTS5 BM25, and local sqlite-vec embeddings fused with RRF and authority tie-breaking. "
-            "min_authority filters authority <= N (1=rules only, 2=rules+official_faq/errata, "
-            "3=+judge, 4=all). Superseded rulings are excluded unless include_superseded=True."
+            "Hybrid search across OPTCG Comprehensive Rules, Tournament Rules Manual (TRM), "
+            "cards, FAQs, and judge rulings using exact-match OPTCG token detection (card IDs, "
+            "rule numbers, TRM section IDs like 'TRM-7.4.1', [Keywords]), FTS5 BM25, and local "
+            "sqlite-vec embeddings fused with RRF and authority tie-breaking. Optional doc_types "
+            "filters any subset of ('rule', 'tournament_rule', 'card', 'ruling'). min_authority "
+            "filters authority <= N (1=rules/TRM only, 2=+official_faq/errata, 3=+judge, 4=all). "
+            "Superseded rulings are excluded unless include_superseded=True."
         ),
     )
     def search(
@@ -223,6 +229,20 @@ def create_server(
         """Look up a Comprehensive Rule and optionally its ordered descendants."""
         with _open_query_db(resolved_settings) as conn:
             return query_get_rule(conn, rule_id, include_children=include_children)
+
+    @server.tool(
+        name="get_trm_section",
+        description=(
+            "Retrieve a specific official Bandai Tournament Rules Manual (TRM) section by "
+            "section_id (e.g. 'TRM-7.4.1', 'TRM-7.4.1.2', or '7.4.1'), including its ancestor "
+            "chain and, when include_children=True, all descendant subsections/infractions "
+            "ordered numerically."
+        ),
+    )
+    def get_trm_section(section_id: str, include_children: bool = True) -> dict[str, Any]:
+        """Look up a Tournament Rules Manual section and optionally its ordered descendants."""
+        with _open_query_db(resolved_settings) as conn:
+            return query_get_trm_section(conn, section_id, include_children=include_children)
 
     @server.tool(
         name="get_card",

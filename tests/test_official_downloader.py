@@ -20,6 +20,7 @@ _FAKE_ERRATA_HTML = (
 def _build_mock_client(
     *,
     rules_rev: str = "20260828",
+    trm_rev: str = "20260116",
     faq_rev: str = "20261030",
     pdf_bytes: bytes = _FAKE_PDF_V1,
     errata_html: str = _FAKE_ERRATA_HTML,
@@ -34,7 +35,9 @@ def _build_mock_client(
             html = (
                 f'<a href="/pdf/playsheet.pdf?20250929">Playsheet</a>'
                 f'<a href="/pdf/rule_comprehensive.pdf?{rules_rev}">Rules</a>'
+                f'<a href="/pdf/tournament_rules_manual.pdf?{trm_rev}">TRM</a>'
                 f'<a href="https://evil.example/pdf/rule_comprehensive.pdf">Off-host</a>'
+                f'<a href="https://evil.example/pdf/tournament_rules_manual.pdf">Off-host TRM</a>'
             )
             return httpx.Response(200, text=html)
 
@@ -63,17 +66,20 @@ def test_fetch_official_docs_downloads_skips_and_updates_on_revision(tmp_path: P
     with _build_mock_client(request_log=log_first) as client:
         first = fetch_official_docs(tmp_path, client=client)
 
-    assert first.downloaded == 4
+    assert first.downloaded == 5
     assert first.skipped == 0
     assert first.rules_files == 1
+    assert first.trm_files == 1
     assert first.faq_files == 2
     assert first.errata_files == 1
     assert (tmp_path / "rules" / "rule_comprehensive.pdf").read_bytes() == _FAKE_PDF_V1
+    assert (tmp_path / "rules" / "tournament_rules_manual.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "faq" / "qa_rules.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "faq" / "qa_op05.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "faq" / "errata_card.html").read_text(encoding="utf-8") == _FAKE_ERRATA_HTML
-    # Off-host PDF links must never be fetched.
+    # Off-host PDF links must never be fetched, and /rules/ is requested only once.
     assert not any("evil.example" in u or "other.example" in u for u in log_first)
+    assert sum(1 for u in log_first if u.endswith("/rules/")) == 1
 
     # Second run with identical revisions skips every file without re-downloading PDFs.
     log_second: list[str] = []
@@ -81,23 +87,24 @@ def test_fetch_official_docs_downloads_skips_and_updates_on_revision(tmp_path: P
         second = fetch_official_docs(tmp_path, client=client)
 
     assert second.downloaded == 0
-    assert second.skipped == 4
+    assert second.skipped == 5
     assert not any("/pdf/" in u for u in log_second)
 
-    # Revision bump on rules PDF re-downloads ONLY rule_comprehensive.pdf.
-    with _build_mock_client(rules_rev="20261201", pdf_bytes=_FAKE_PDF_V2) as client:
+    # Revision bump on TRM PDF re-downloads ONLY tournament_rules_manual.pdf.
+    with _build_mock_client(trm_rev="20261215", pdf_bytes=_FAKE_PDF_V2) as client:
         third = fetch_official_docs(tmp_path, client=client)
 
     assert third.downloaded == 1
-    assert third.skipped == 3
-    assert (tmp_path / "rules" / "rule_comprehensive.pdf").read_bytes() == _FAKE_PDF_V2
+    assert third.skipped == 4
+    assert (tmp_path / "rules" / "tournament_rules_manual.pdf").read_bytes() == _FAKE_PDF_V2
+    assert (tmp_path / "rules" / "rule_comprehensive.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "faq" / "qa_op05.pdf").read_bytes() == _FAKE_PDF_V1
 
-    # --force re-downloads all 4 files regardless of manifest.
-    with _build_mock_client(rules_rev="20261201", pdf_bytes=_FAKE_PDF_V2) as client:
+    # --force re-downloads all 5 files regardless of manifest.
+    with _build_mock_client(trm_rev="20261215", pdf_bytes=_FAKE_PDF_V2) as client:
         forced = fetch_official_docs(tmp_path, force=True, client=client)
 
-    assert forced.downloaded == 4
+    assert forced.downloaded == 5
     assert forced.skipped == 0
 
 
@@ -105,9 +112,21 @@ def test_fetch_official_docs_only_filter_and_validation(tmp_path: Path) -> None:
     with _build_mock_client() as client:
         rules_only = fetch_official_docs(tmp_path, only="rules", client=client)
     assert rules_only.rules_files == 1
+    assert rules_only.trm_files == 0
     assert rules_only.faq_files == 0
     assert rules_only.errata_files == 0
+    assert (tmp_path / "rules" / "rule_comprehensive.pdf").is_file()
+    assert not (tmp_path / "rules" / "tournament_rules_manual.pdf").exists()
     assert not (tmp_path / "faq").exists()
+
+    with _build_mock_client() as client:
+        trm_only = fetch_official_docs(tmp_path / "trm_only", only="trm", client=client)
+    assert trm_only.rules_files == 0
+    assert trm_only.trm_files == 1
+    assert trm_only.faq_files == 0
+    assert trm_only.errata_files == 0
+    assert (tmp_path / "trm_only" / "rules" / "tournament_rules_manual.pdf").is_file()
+    assert not (tmp_path / "trm_only" / "rules" / "rule_comprehensive.pdf").exists()
 
     # Non-PDF response for a PDF link is rejected cleanly.
     with (
@@ -140,9 +159,10 @@ def test_cli_fetch_official_command(
     ) -> OfficialFetchSummary:
         captured.update(out_dir=out_dir, only=only, base_url=base_url, force=force)
         return OfficialFetchSummary(
-            downloaded=3,
+            downloaded=4,
             skipped=1,
             rules_files=1,
+            trm_files=1,
             faq_files=2,
             errata_files=1,
             out_dir=out_dir,
@@ -156,7 +176,8 @@ def test_cli_fetch_official_command(
     assert exit_code == 0
     stdout = capsys.readouterr().out
     assert "Fetched official Bandai docs" in stdout
-    assert "downloaded=3, skipped=1" in stdout
+    assert "downloaded=4, skipped=1" in stdout
+    assert "trm=1" in stdout
     assert captured["out_dir"] == tmp_path
     assert captured["only"] == "all"
     assert captured["force"] is True

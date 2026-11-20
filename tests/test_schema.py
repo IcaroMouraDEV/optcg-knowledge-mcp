@@ -9,9 +9,11 @@ import pytest
 from optcg_knowledge.db import (
     SCHEMA_VERSION,
     authority_for_source,
+    connect,
     ensure_vec_table,
     get_meta,
     init_schema,
+    migrate_schema,
 )
 from optcg_knowledge.db.models import ChunkRecord
 from optcg_knowledge.ingest.chunking import compute_content_hash, upsert_chunks
@@ -27,6 +29,7 @@ def test_schema_creates_expected_tables_and_meta(db_conn: sqlite3.Connection) ->
     }
     expected = {
         "rules",
+        "trm_sections",
         "cards",
         "rulings",
         "ruling_cards",
@@ -185,3 +188,168 @@ def test_sqlite_vec_insert_knn_and_rebuild_on_dim_change(db_conn: sqlite3.Connec
         "SELECT COUNT(*) FROM chunks WHERE embedded_hash IS NOT NULL"
     ).fetchone()[0]
     assert embedded_count == 0
+
+
+def test_migrate_v2_to_v3_preserves_chunk_rowids_fts_and_vectors(tmp_path) -> None:
+    db_path = tmp_path / "legacy_v2.db"
+    embedder = HashEmbedder(dimension=64)
+
+    with connect(db_path) as conn:
+        # Construct an authentic schema v2 DB (no trm_sections, old chunks CHECK constraint).
+        conn.executescript(
+            """
+            CREATE TABLE rules (
+                rule_id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                section TEXT NOT NULL,
+                text TEXT NOT NULL,
+                rules_version TEXT,
+                effective_date TEXT
+            );
+            CREATE TABLE rulings (
+                ruling_id TEXT PRIMARY KEY,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                source TEXT NOT NULL CHECK (
+                    source IN ('rules', 'official_faq', 'errata', 'judge', 'community')
+                ),
+                authority INTEGER NOT NULL CHECK (authority IN (1, 2, 3, 4)),
+                date TEXT,
+                rules_version TEXT,
+                url TEXT,
+                superseded_by TEXT,
+                reviewed INTEGER NOT NULL DEFAULT 0 CHECK (reviewed IN (0, 1)),
+                raw_ref TEXT,
+                judge_tier TEXT CHECK (
+                    judge_tier IS NULL OR judge_tier IN ('tier_0', 'tier_2', 'tier_1')
+                )
+            );
+            CREATE TABLE chunks (
+                chunk_id TEXT PRIMARY KEY,
+                doc_type TEXT NOT NULL CHECK (doc_type IN ('rule', 'ruling', 'card')),
+                doc_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                authority INTEGER NOT NULL CHECK (authority IN (1, 2, 3, 4)),
+                metadata TEXT NOT NULL DEFAULT '{}',
+                content_hash TEXT NOT NULL,
+                embedded_hash TEXT,
+                embedded_model TEXT
+            );
+            CREATE UNIQUE INDEX idx_chunks_doc ON chunks(doc_type, doc_id);
+            CREATE INDEX idx_chunks_authority ON chunks(authority);
+            CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                text, content='chunks', content_rowid='rowid', tokenize='unicode61'
+            );
+            CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+            END;
+            CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, text)
+                VALUES ('delete', old.rowid, old.text);
+            END;
+            CREATE TRIGGER chunks_au AFTER UPDATE OF text ON chunks
+            WHEN old.text IS NOT new.text BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, text)
+                VALUES ('delete', old.rowid, old.text);
+                INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+            END;
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            """
+        )
+        with conn:
+            ensure_vec_table(conn, embedding_dim=64, embedding_model=embedder.model_name)
+            # Insert 3 chunks and delete middle one so surviving rowids have a gap (1 and 3).
+            for cid, doc_id, text in [
+                ("rule:1-1", "1-1", "1-1. Fundamental game rule about Leader cards."),
+                ("rule:temp", "temp", "Temporary deleted chunk."),
+                ("card:OP05-119", "OP05-119", "OP05-119 Monkey.D.Luffy extra turn."),
+            ]:
+                chash = compute_content_hash(text)
+                conn.execute(
+                    """
+                    INSERT INTO chunks (
+                        chunk_id, doc_type, doc_id, text, authority, metadata,
+                        content_hash, embedded_hash, embedded_model
+                    ) VALUES (?, ?, ?, ?, 1, '{}', ?, ?, ?)
+                    """,
+                    (
+                        cid,
+                        "rule" if cid.startswith("rule:") else "card",
+                        doc_id,
+                        text,
+                        chash,
+                        chash,
+                        embedder.model_name,
+                    ),
+                )
+            conn.execute("DELETE FROM chunks WHERE chunk_id = 'rule:temp'")
+            rows = conn.execute(
+                "SELECT rowid, chunk_id, text FROM chunks ORDER BY rowid"
+            ).fetchall()
+            pre_rowids = [(int(r["rowid"]), str(r["chunk_id"])) for r in rows]
+            assert pre_rowids == [(1, "rule:1-1"), (3, "card:OP05-119")]
+            vectors = embedder.embed([str(r["text"]) for r in rows])
+            for row, vec in zip(rows, vectors, strict=True):
+                conn.execute(
+                    "INSERT INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
+                    (row["rowid"], serialize_vector(vec)),
+                )
+
+        # Confirm v2 rejects tournament_rule before migration.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO chunks (chunk_id, doc_type, doc_id, text, authority, content_hash)
+                VALUES ('trm:TRM-1.0', 'tournament_rule', 'TRM-1.0', 'text', 1, 'abc')
+                """
+            )
+
+        # Apply v2 -> v3 migration.
+        with conn:
+            migrated = migrate_schema(conn)
+        assert migrated is True
+        assert get_meta(conn, "schema_version") == SCHEMA_VERSION
+
+        # Exact rowids preserved -> existing chunks_vec KNN search still resolves accurately!
+        post_rowids = [
+            (int(r["rowid"]), str(r["chunk_id"]))
+            for r in conn.execute("SELECT rowid, chunk_id FROM chunks ORDER BY rowid").fetchall()
+        ]
+        assert post_rowids == [(1, "rule:1-1"), (3, "card:OP05-119")]
+
+        qvec = serialize_vector(embedder.embed_query("Monkey.D.Luffy extra turn"))
+        knn = conn.execute(
+            """
+            SELECT c.chunk_id
+            FROM chunks_vec v
+            JOIN chunks c ON c.rowid = v.rowid
+            WHERE v.embedding MATCH ? AND k = 2
+            ORDER BY v.distance ASC
+            """,
+            (qvec,),
+        ).fetchall()
+        assert knn[0]["chunk_id"] == "card:OP05-119"
+
+        # FTS5 stays intact and tournament_rule chunks are now accepted.
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO chunks (chunk_id, doc_type, doc_id, text, authority, content_hash)
+                VALUES ('trm:TRM-7.4.1', 'tournament_rule', 'TRM-7.4.1', 'Game Play Error', 1, 'h1')
+                """
+            )
+        fts_hits = conn.execute(
+            """
+            SELECT c.chunk_id
+            FROM chunks_fts f
+            JOIN chunks c ON c.rowid = f.rowid
+            WHERE chunks_fts MATCH '"Game" AND "Play"'
+            """
+        ).fetchall()
+        assert [r["chunk_id"] for r in fts_hits] == ["trm:TRM-7.4.1"]
+
+        # Running migrate_schema again is a clean no-op.
+        with conn:
+            assert migrate_schema(conn) is False

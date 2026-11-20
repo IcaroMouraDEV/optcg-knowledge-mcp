@@ -5,6 +5,7 @@ from optcg_knowledge.ingest.chunking import (
     build_card_chunk,
     build_rule_chunk,
     build_ruling_chunk,
+    build_trm_chunk,
     compute_content_hash,
     upsert_chunks,
 )
@@ -38,6 +39,13 @@ from optcg_knowledge.ingest.rules_parser import (
     parse_rules_pdf,
     parse_rules_text,
 )
+from optcg_knowledge.ingest.trm_parser import (
+    ParsedTrmDocument,
+    TrmIngestSummary,
+    ingest_trm,
+    parse_trm_pdf,
+    parse_trm_text,
+)
 
 __all__ = [
     "CardsIngestSummary",
@@ -50,17 +58,21 @@ __all__ = [
     "ParsedFaqDocument",
     "ParsedFaqEntry",
     "ParsedRulesDocument",
+    "ParsedTrmDocument",
     "RulesIngestSummary",
     "SentenceTransformerEmbedder",
+    "TrmIngestSummary",
     "build_card_chunk",
     "build_rule_chunk",
     "build_ruling_chunk",
+    "build_trm_chunk",
     "compute_content_hash",
     "embed_chunks",
     "fetch_official_docs",
     "ingest_cards",
     "ingest_faqs",
     "ingest_rules",
+    "ingest_trm",
     "normalize_cards",
     "parse_faq_file",
     "parse_faq_html",
@@ -69,6 +81,8 @@ __all__ = [
     "parse_faq_text",
     "parse_rules_pdf",
     "parse_rules_text",
+    "parse_trm_pdf",
+    "parse_trm_text",
     "serialize_vector",
     "upsert_chunks",
 ]

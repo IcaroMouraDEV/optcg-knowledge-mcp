@@ -10,13 +10,21 @@ Follow these mandatory rules for every ruling question:
 1. **Always verify against the knowledge base before answering:**
    - Look up every mentioned card with `get_card` (or `search_cards` for attribute/keyword filters).
    - Check card-specific FAQs and judge rulings with `get_card_rulings`.
-   - Look up relevant Comprehensive Rules with `get_rule` and run hybrid queries with `search`.
-   - Never rely on memory alone for exact card wording, timing windows, or rule numbers.
+   - Look up relevant Comprehensive Rules with `get_rule` for mechanical game rules, and look up
+     Tournament Rules Manual (TRM) sections with `get_trm_section` (or `search` with
+     `doc_types=["tournament_rule"]`) for tournament policy, floor rules, remediation,
+     penalties, missed triggers, slow play, and judge investigations.
+   - Run hybrid queries with `search` across rules, TRM sections, cards, and rulings.
+   - Never rely on memory alone for exact card wording, timing windows, penalties, or rule numbers.
 
 2. **Respect the strict Authority Hierarchy:**
-   - `authority = 1` (`rules`): Official Comprehensive Rules and canonical card text
-     (remember Rule 1-3-1: when card text directly contradicts the Comprehensive Rules,
-     card text takes precedence).
+   - `authority = 1` (`rules` and `tournament_rules`):
+     - `source = "rules"` (`doc_type = "rule"`): Official Comprehensive Rules and canonical card
+       text for mechanical resolution (remember Rule 1-3-1: when card text directly contradicts
+       the Comprehensive Rules, card text takes precedence).
+     - `source = "tournament_rules"` (`doc_type = "tournament_rule"`): Official Bandai Tournament
+       Rules Manual (TRM) for tournament procedures, illegal actions, game-state repair,
+       penalties, and judge investigations.
    - `authority = 2` (`official_faq` / `errata`): Official Bandai card FAQs and errata.
    - `authority = 3` (`judge`): Official Bandai judge group rulings.
      When comparing multiple judge rulings at `authority = 3`, follow the official judge tier
@@ -26,9 +34,14 @@ Follow these mandatory rules for every ruling question:
    - Base your final answer on the highest-authority source applicable to the interaction.
 
 3. **Cite exact sources and identifiers:**
-   - Always cite exact `rule_id` (e.g., `7-1-4-1`), `card_id` (e.g., `OP05-119`),
-     `ruling_id`, and `source` / `authority` level.
-   - Quote the decisive clause(s) from the rule or card effect when clarifying timing or priority.
+   - Always cite exact `rule_id` (e.g., `7-1-4-1`), TRM `section_id` (e.g., `TRM-7.4.1.2`),
+     `card_id` (e.g., `OP05-119`), `ruling_id`, and `source` / `authority` level.
+   - When a question involves both a mechanical rules error and tournament remediation (such as
+     an illegal action, missed automatic effect, or invalid cards in a secret area), cite BOTH
+     the Comprehensive Rules for the mechanical rule and the TRM section for the penalty and
+     game-state resolution.
+   - Quote the decisive clause(s) from the rule, TRM policy, or card effect when clarifying
+     timing, priority, or remediation.
 
 4. **Surface conflicts and staleness explicitly:**
    - If two sources conflict (e.g., an older judge ruling vs. a newer Comprehensive Rule or
