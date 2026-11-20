@@ -17,6 +17,7 @@ from optcg_knowledge.curation.rulings import (
     validate_rulings,
 )
 from optcg_knowledge.db import init_schema, migrate_schema, open_db
+from optcg_knowledge.ingest.banlist_parser import ingest_banlist, parse_banlist_path
 from optcg_knowledge.ingest.cards_importer import ingest_cards
 from optcg_knowledge.ingest.embed_pipeline import embed_chunks
 from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbedder
@@ -82,12 +83,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "fetch-official",
         help=(
             "Download official Bandai Comprehensive Rules PDF, Tournament Rules Manual PDF, "
-            "FAQ PDFs, and errata HTML."
+            "FAQ PDFs, errata HTML, and banlist/restriction HTML."
         ),
     )
     fetch_parser.add_argument(
         "--only",
-        choices=("all", "rules", "trm", "faq", "errata"),
+        choices=("all", "rules", "trm", "faq", "errata", "banlist"),
         default="all",
         help="Download only a subset of official documents (default: all).",
     )
@@ -214,6 +215,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--url",
         default=None,
         help="Optional official reference URL for the ingested FAQ/errata document.",
+    )
+
+    banlist_parser = subparsers.add_parser(
+        "banlist",
+        help="Parse and ingest official Bandai banlist HTML or manual JSON restrictions.",
+    )
+    banlist_parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Banlist HTML/JSON file or directory (defaults to data/raw/banlist).",
+    )
+    banlist_parser.add_argument(
+        "--effective-date",
+        default=None,
+        help="Override detected effective date (e.g., 2026-10-12).",
+    )
+    banlist_parser.add_argument(
+        "--url",
+        default=None,
+        help="Optional official reference URL for the ingested banlist.",
+    )
+    banlist_parser.add_argument(
+        "--include-upcoming",
+        action="store_true",
+        help="Also include scheduled future-effective announcements from official Bandai HTML.",
     )
 
     embed_parser = subparsers.add_parser(
@@ -359,7 +387,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"Fetched official Bandai docs into {summary.out_dir} "
             f"(downloaded={summary.downloaded}, skipped={summary.skipped}, "
             f"rules={summary.rules_files}, trm={summary.trm_files}, "
-            f"faq={summary.faq_files}, errata={summary.errata_files})"
+            f"faq={summary.faq_files}, errata={summary.errata_files}, "
+            f"banlist={summary.banlist_files})"
         )
         return 0
 
@@ -458,6 +487,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"(official_faq={summary.official_faq_count}, errata={summary.errata_count}, "
             f"card_links={summary.card_links_upserted}, rule_links={summary.rule_links_upserted}, "
             f"chunks={summary.chunks_upserted})"
+        )
+        return 0
+
+    if args.command == "banlist":
+        banlist_path = args.path or (settings.raw_data_dir / "banlist")
+        banlist_doc = parse_banlist_path(
+            banlist_path,
+            effective_date=args.effective_date,
+            source_url=args.url,
+            include_upcoming=args.include_upcoming,
+        )
+        with open_db(
+            settings.db_path,
+            init=True,
+            embedding_model=settings.embedding_model,
+            embedding_dim=settings.embedding_dim,
+        ) as conn:
+            banlist_summary = ingest_banlist(conn, banlist_doc)
+        print(
+            f"Ingested {banlist_summary.restrictions_upserted} card restriction(s) "
+            f"(removed={banlist_summary.restrictions_removed}, "
+            f"banned={banlist_summary.banned_count}, "
+            f"restricted={banlist_summary.restricted_count}, "
+            f"pair_banned={banlist_summary.pair_banned_count}, "
+            f"effective_date={banlist_summary.effective_date or 'unknown'}, "
+            f"source={banlist_summary.source_name})"
         )
         return 0
 

@@ -4,7 +4,12 @@ from optcg_knowledge.db.connection import connect, open_db
 from optcg_knowledge.db.models import (
     AUTHORITY_BY_SOURCE,
     JUDGE_TIER_RANK,
+    MAX_COPIES_BY_BAN_STATUS,
+    VALID_BAN_STATUSES,
+    ActiveBanStatus,
+    BanStatus,
     CardRecord,
+    CardRestrictionRecord,
     ChunkRecord,
     JudgeTier,
     RuleRecord,
@@ -12,6 +17,7 @@ from optcg_knowledge.db.models import (
     TrmSectionRecord,
     authority_for_source,
     judge_tier_rank,
+    normalize_ban_status,
     normalize_judge_tier,
 )
 from optcg_knowledge.db.schema import (
@@ -27,7 +33,12 @@ from optcg_knowledge.db.schema import (
 __all__ = [
     "AUTHORITY_BY_SOURCE",
     "JUDGE_TIER_RANK",
+    "MAX_COPIES_BY_BAN_STATUS",
+    "VALID_BAN_STATUSES",
+    "ActiveBanStatus",
+    "BanStatus",
     "CardRecord",
+    "CardRestrictionRecord",
     "ChunkRecord",
     "JudgeTier",
     "RuleRecord",
@@ -41,6 +52,7 @@ __all__ = [
     "init_schema",
     "judge_tier_rank",
     "migrate_schema",
+    "normalize_ban_status",
     "normalize_judge_tier",
     "open_db",
     "set_meta",

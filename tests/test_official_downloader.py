@@ -15,6 +15,11 @@ _FAKE_PDF_V2 = b"%PDF-1.7\n%mock-v2\n%%EOF\n"
 _FAKE_ERRATA_HTML = (
     "<!doctype html><html><body><div class='errataModal'>OP01-002</div></body></html>"
 )
+_FAKE_BANLIST_HTML = (
+    "<!doctype html><html><body><h3>Cards with Active Restrictions</h3>"
+    "<h4>Banned Cards</h4><ul><li>OP06-047 Charlotte Pudding</li></ul>"
+    "<img src='/onepiececg/OP06-047.webp' alt='OP06-047'></body></html>"
+)
 
 
 def _build_mock_client(
@@ -24,6 +29,7 @@ def _build_mock_client(
     faq_rev: str = "20261030",
     pdf_bytes: bytes = _FAKE_PDF_V1,
     errata_html: str = _FAKE_ERRATA_HTML,
+    banlist_html: str = _FAKE_BANLIST_HTML,
     request_log: list[str] | None = None,
 ) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -53,6 +59,9 @@ def _build_mock_client(
         if request.url.path == "/rules/errata_card/":
             return httpx.Response(200, text=errata_html)
 
+        if request.url.path == "/rules/restriction/":
+            return httpx.Response(200, text=banlist_html)
+
         if request.url.path.startswith("/pdf/") and request.url.path.endswith(".pdf"):
             return httpx.Response(200, content=pdf_bytes)
 
@@ -66,19 +75,24 @@ def test_fetch_official_docs_downloads_skips_and_updates_on_revision(tmp_path: P
     with _build_mock_client(request_log=log_first) as client:
         first = fetch_official_docs(tmp_path, client=client)
 
-    assert first.downloaded == 5
+    assert first.downloaded == 6
     assert first.skipped == 0
     assert first.rules_files == 1
     assert first.trm_files == 1
     assert first.faq_files == 2
     assert first.errata_files == 1
+    assert first.banlist_files == 1
     assert (tmp_path / "rules" / "rule_comprehensive.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "rules" / "tournament_rules_manual.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "faq" / "qa_rules.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "faq" / "qa_op05.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "faq" / "errata_card.html").read_text(encoding="utf-8") == _FAKE_ERRATA_HTML
-    # Off-host PDF links must never be fetched, and /rules/ is requested only once.
+    assert (
+        tmp_path / "banlist" / "restriction.html"
+    ).read_text(encoding="utf-8") == _FAKE_BANLIST_HTML
+    # Off-host PDF links and card images must never be fetched, and /rules/ is requested once.
     assert not any("evil.example" in u or "other.example" in u for u in log_first)
+    assert not any(u.endswith(".webp") for u in log_first)
     assert sum(1 for u in log_first if u.endswith("/rules/")) == 1
 
     # Second run with identical revisions skips every file without re-downloading PDFs.
@@ -87,7 +101,7 @@ def test_fetch_official_docs_downloads_skips_and_updates_on_revision(tmp_path: P
         second = fetch_official_docs(tmp_path, client=client)
 
     assert second.downloaded == 0
-    assert second.skipped == 5
+    assert second.skipped == 6
     assert not any("/pdf/" in u for u in log_second)
 
     # Revision bump on TRM PDF re-downloads ONLY tournament_rules_manual.pdf.
@@ -95,16 +109,16 @@ def test_fetch_official_docs_downloads_skips_and_updates_on_revision(tmp_path: P
         third = fetch_official_docs(tmp_path, client=client)
 
     assert third.downloaded == 1
-    assert third.skipped == 4
+    assert third.skipped == 5
     assert (tmp_path / "rules" / "tournament_rules_manual.pdf").read_bytes() == _FAKE_PDF_V2
     assert (tmp_path / "rules" / "rule_comprehensive.pdf").read_bytes() == _FAKE_PDF_V1
     assert (tmp_path / "faq" / "qa_op05.pdf").read_bytes() == _FAKE_PDF_V1
 
-    # --force re-downloads all 5 files regardless of manifest.
+    # --force re-downloads all 6 files regardless of manifest.
     with _build_mock_client(trm_rev="20261215", pdf_bytes=_FAKE_PDF_V2) as client:
         forced = fetch_official_docs(tmp_path, force=True, client=client)
 
-    assert forced.downloaded == 5
+    assert forced.downloaded == 6
     assert forced.skipped == 0
 
 
@@ -115,6 +129,7 @@ def test_fetch_official_docs_only_filter_and_validation(tmp_path: Path) -> None:
     assert rules_only.trm_files == 0
     assert rules_only.faq_files == 0
     assert rules_only.errata_files == 0
+    assert rules_only.banlist_files == 0
     assert (tmp_path / "rules" / "rule_comprehensive.pdf").is_file()
     assert not (tmp_path / "rules" / "tournament_rules_manual.pdf").exists()
     assert not (tmp_path / "faq").exists()
@@ -125,8 +140,18 @@ def test_fetch_official_docs_only_filter_and_validation(tmp_path: Path) -> None:
     assert trm_only.trm_files == 1
     assert trm_only.faq_files == 0
     assert trm_only.errata_files == 0
+    assert trm_only.banlist_files == 0
     assert (tmp_path / "trm_only" / "rules" / "tournament_rules_manual.pdf").is_file()
     assert not (tmp_path / "trm_only" / "rules" / "rule_comprehensive.pdf").exists()
+
+    banlist_log: list[str] = []
+    with _build_mock_client(request_log=banlist_log) as client:
+        banlist_only = fetch_official_docs(tmp_path / "ban_only", only="banlist", client=client)
+    assert banlist_only.banlist_files == 1
+    assert banlist_only.rules_files == 0
+    assert banlist_only.trm_files == 0
+    assert (tmp_path / "ban_only" / "banlist" / "restriction.html").is_file()
+    assert not any(u.endswith(".webp") for u in banlist_log)
 
     # Non-PDF response for a PDF link is rejected cleanly.
     with (
@@ -141,6 +166,13 @@ def test_fetch_official_docs_only_filter_and_validation(tmp_path: Path) -> None:
         pytest.raises(ValueError, match="errata HTML"),
     ):
         fetch_official_docs(tmp_path / "bad_errata", only="errata", client=bad_client)
+
+    # Non-banlist response for banlist page is rejected cleanly.
+    with (
+        _build_mock_client(banlist_html="<html>Maintenance</html>") as bad_client,
+        pytest.raises(ValueError, match="banlist/restriction HTML"),
+    ):
+        fetch_official_docs(tmp_path / "bad_banlist", only="banlist", client=bad_client)
 
 
 def test_cli_fetch_official_command(
@@ -159,13 +191,14 @@ def test_cli_fetch_official_command(
     ) -> OfficialFetchSummary:
         captured.update(out_dir=out_dir, only=only, base_url=base_url, force=force)
         return OfficialFetchSummary(
-            downloaded=4,
+            downloaded=5,
             skipped=1,
             rules_files=1,
             trm_files=1,
             faq_files=2,
             errata_files=1,
             out_dir=out_dir,
+            banlist_files=1,
         )
 
     monkeypatch.setattr("optcg_knowledge.cli.fetch_official_docs", fake_fetch)
@@ -176,8 +209,9 @@ def test_cli_fetch_official_command(
     assert exit_code == 0
     stdout = capsys.readouterr().out
     assert "Fetched official Bandai docs" in stdout
-    assert "downloaded=4, skipped=1" in stdout
+    assert "downloaded=5, skipped=1" in stdout
     assert "trm=1" in stdout
+    assert "banlist=1" in stdout
     assert captured["out_dir"] == tmp_path
     assert captured["only"] == "all"
     assert captured["force"] is True

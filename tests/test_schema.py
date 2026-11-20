@@ -31,6 +31,7 @@ def test_schema_creates_expected_tables_and_meta(db_conn: sqlite3.Connection) ->
         "rules",
         "trm_sections",
         "cards",
+        "card_restrictions",
         "rulings",
         "ruling_cards",
         "ruling_rules",
@@ -351,5 +352,78 @@ def test_migrate_v2_to_v3_preserves_chunk_rowids_fts_and_vectors(tmp_path) -> No
         assert [r["chunk_id"] for r in fts_hits] == ["trm:TRM-7.4.1"]
 
         # Running migrate_schema again is a clean no-op.
+        with conn:
+            assert migrate_schema(conn) is False
+
+
+def test_migrate_v3_to_v4_adds_card_restrictions_without_touching_vectors(tmp_path) -> None:
+    db_path = tmp_path / "legacy_v3.db"
+    embedder = HashEmbedder(dimension=64)
+
+    with connect(db_path) as conn:
+        init_schema(conn, embedding_dim=64, embedding_model=embedder.model_name)
+        with conn:
+            # Simulate a schema v3 database before card_restrictions existed.
+            conn.execute("DROP TABLE card_restrictions")
+            conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+            text = "OP05-119 Monkey.D.Luffy extra turn."
+            upsert_chunks(
+                conn,
+                [
+                    ChunkRecord(
+                        chunk_id="card:OP05-119",
+                        doc_type="card",
+                        doc_id="OP05-119",
+                        text=text,
+                        authority=1,
+                        metadata={"card_id": "OP05-119"},
+                        content_hash=compute_content_hash(text),
+                    )
+                ],
+            )
+            row = conn.execute(
+                "SELECT rowid, text FROM chunks WHERE chunk_id = 'card:OP05-119'"
+            ).fetchone()
+            vec = embedder.embed([str(row["text"])])[0]
+            conn.execute(
+                "INSERT INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
+                (row["rowid"], serialize_vector(vec)),
+            )
+
+        with conn:
+            migrated = migrate_schema(conn)
+        assert migrated is True
+        assert get_meta(conn, "schema_version") == SCHEMA_VERSION
+
+        # card_restrictions exists and enforces CHECK constraints.
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO card_restrictions (card_id, ban_status, max_copies, paired_card_ids)
+                VALUES ('OP06-047', 'banned', 0, '[]')
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO card_restrictions (card_id, ban_status, max_copies)
+                VALUES ('OP01-001', 'invalid', 0)
+                """
+            )
+
+        # Existing chunks_vec embeddings remain completely valid.
+        qvec = serialize_vector(embedder.embed_query("Monkey.D.Luffy extra turn"))
+        knn = conn.execute(
+            """
+            SELECT c.chunk_id
+            FROM chunks_vec v
+            JOIN chunks c ON c.rowid = v.rowid
+            WHERE v.embedding MATCH ? AND k = 1
+            """,
+            (qvec,),
+        ).fetchall()
+        assert [r["chunk_id"] for r in knn] == ["card:OP05-119"]
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
+
         with conn:
             assert migrate_schema(conn) is False
