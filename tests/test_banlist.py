@@ -81,17 +81,19 @@ _REALISTIC_BANDAI_HTML = """\
 
 
 def test_parse_bandai_banlist_html_active_vs_upcoming() -> None:
-    active_doc = parse_banlist_html(_REALISTIC_BANDAI_HTML)
-    by_id = {rec.card_id: rec for rec in active_doc.restrictions}
+    doc = parse_banlist_html(_REALISTIC_BANDAI_HTML)
+    by_id = {rec.card_id: rec for rec in doc.restrictions}
+    up_by_id = {rec.card_id: rec for rec in doc.upcoming_restrictions}
 
-    assert active_doc.effective_date == "2026-10-12"
-    assert active_doc.upcoming_effective_date == "2026-11-27"
-    assert active_doc.upcoming_included is False
+    assert doc.effective_date == "2026-10-12"
+    assert doc.upcoming_effective_date == "2026-11-27"
+    assert doc.upcoming_included is True
     # Nav noise and upcoming announcements must NOT leak into active restrictions.
     assert "OP99-999" not in by_id
     assert "EB05-001" not in by_id
     assert "OP13-001" not in by_id
     assert set(by_id) == {"OP06-047", "ST10-001", "OP11-040", "OP11-067", "OP08-069"}
+    assert all(rec.scope == "active" for rec in doc.restrictions)
 
     assert by_id["OP06-047"].ban_status == "banned"
     assert by_id["OP06-047"].max_copies == 0
@@ -105,16 +107,22 @@ def test_parse_bandai_banlist_html_active_vs_upcoming() -> None:
     assert by_id["OP11-067"].paired_card_ids == ("OP11-040",)
     assert by_id["OP08-069"].paired_card_ids == ("OP11-040",)
 
-    # With include_upcoming=True, scheduled Card A x Card B pairs are merged symmetrically.
-    upcoming_doc = parse_banlist_html(_REALISTIC_BANDAI_HTML, include_upcoming=True)
-    up_by_id = {rec.card_id: rec for rec in upcoming_doc.restrictions}
-    assert upcoming_doc.upcoming_included is True
-    assert upcoming_doc.effective_date == "2026-11-27"
+    # Scheduled Card A x Card B pairs are extracted into upcoming_restrictions separately.
+    assert set(up_by_id) == {"EB05-001", "OP01-002", "OP13-001"}
+    assert all(rec.scope == "upcoming" for rec in doc.upcoming_restrictions)
     assert up_by_id["EB05-001"].ban_status == "pair_banned"
     assert up_by_id["EB05-001"].paired_card_ids == ("OP01-002", "OP13-001")
     assert up_by_id["EB05-001"].effective_date == "2026-11-27"
     assert up_by_id["OP13-001"].paired_card_ids == ("EB05-001",)
     assert up_by_id["OP01-002"].paired_card_ids == ("EB05-001",)
+
+    # Passing include_upcoming=False omits upcoming_restrictions while keeping active intact.
+    active_only_doc = parse_banlist_html(_REALISTIC_BANDAI_HTML, include_upcoming=False)
+    assert active_only_doc.effective_date == "2026-10-12"
+    assert active_only_doc.upcoming_effective_date == "2026-11-27"
+    assert active_only_doc.upcoming_included is False
+    assert active_only_doc.upcoming_restrictions == ()
+    assert {r.card_id for r in active_only_doc.restrictions} == set(by_id)
 
 
 def test_parse_bandai_banlist_html_restricted_and_precedence() -> None:
@@ -342,6 +350,95 @@ def test_ingest_banlist_idempotency_unban_and_query_contracts(
     ]
 
 
+def test_upcoming_restrictions_do_not_pollute_active_legality(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+) -> None:
+    _, db_conn, _ = populated_db
+
+    # OP04-083 is currently restricted (max 1) and scheduled to be banned on 2026-11-27.
+    # OP02-106 and ST01-014 are currently legal and scheduled to be pair_banned on 2026-11-27.
+    doc, _ = parse_banlist_json(
+        {
+            "effective_date": "2026-10-12",
+            "upcoming_effective_date": "2026-11-27",
+            "restrictions": [
+                {"card_id": "OP04-083", "ban_status": "restricted"},
+            ],
+            "upcoming_restrictions": [
+                {"card_id": "OP04-083", "ban_status": "banned"},
+            ],
+            "upcoming_banned_pairs": [["OP02-106", "ST01-014"]],
+        }
+    )
+    summary = ingest_banlist(db_conn, doc)
+    assert summary.restrictions_upserted == 1
+    assert summary.upcoming_restrictions_upserted == 3
+    assert summary.effective_date == "2026-10-12"
+    assert summary.upcoming_effective_date == "2026-11-27"
+
+    # OP04-083 remains "restricted" today, with upcoming_restriction="banned".
+    sabo = get_card(db_conn, "OP04-083")
+    assert sabo["banlist_effective_date"] == "2026-10-12"
+    assert sabo["banlist_upcoming_effective_date"] == "2026-11-27"
+    assert sabo["cards"][0]["ban_status"] == "restricted"
+    assert sabo["cards"][0]["max_copies"] == 1
+    assert sabo["cards"][0]["upcoming_restriction"] == {
+        "ban_status": "banned",
+        "max_copies": 0,
+        "paired_card_ids": [],
+        "restriction_note": "Cannot be included in any deck.",
+        "effective_date": "2026-11-27",
+        "source_url": None,
+    }
+
+    # OP02-106 remains "legal" (max 4) today in both get_card and search_cards(ban_status="legal"),
+    # while surfacing its scheduled upcoming pair ban.
+    tsuru = get_card(db_conn, "OP02-106")
+    assert tsuru["cards"][0]["ban_status"] == "legal"
+    assert tsuru["cards"][0]["max_copies"] == 4
+    assert tsuru["cards"][0]["upcoming_restriction"] == {
+        "ban_status": "pair_banned",
+        "max_copies": 4,
+        "paired_card_ids": ["ST01-014"],
+        "restriction_note": "Cannot be included in the same deck as ST01-014.",
+        "effective_date": "2026-11-27",
+        "source_url": None,
+    }
+
+    legal_cards = search_cards(db_conn, ban_status="legal")
+    legal_by_id = {c["card_id"]: c for c in legal_cards["cards"]}
+    assert "OP02-106" in legal_by_id
+    assert "ST01-014" in legal_by_id
+    assert "OP04-083" not in legal_by_id
+    assert legal_by_id["OP02-106"]["upcoming_restriction"]["ban_status"] == "pair_banned"
+    assert legal_by_id["OP01-001"]["upcoming_restriction"] is None
+
+    # get_banlist separates active restrictions from the dedicated upcoming section.
+    banlist = get_banlist(db_conn)
+    assert banlist["banlist_effective_date"] == "2026-10-12"
+    assert banlist["banlist_upcoming_effective_date"] == "2026-11-27"
+    assert banlist["counts"] == {
+        "banned": 0,
+        "restricted": 1,
+        "pair_banned": 0,
+        "total": 1,
+    }
+    assert [r["card_id"] for r in banlist["restrictions"]] == ["OP04-083"]
+    assert banlist["upcoming"]["effective_date"] == "2026-11-27"
+    assert banlist["upcoming"]["counts"] == {
+        "banned": 1,
+        "restricted": 0,
+        "pair_banned": 2,
+        "total": 3,
+    }
+    assert banlist["upcoming"]["banned_pairs"] == [["OP02-106", "ST01-014"]]
+    assert [r["card_id"] for r in banlist["upcoming"]["restrictions"]] == [
+        "OP04-083",
+        "OP02-106",
+        "ST01-014",
+    ]
+
+
 def test_cli_banlist_command_offline(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -350,22 +447,36 @@ def test_cli_banlist_command_offline(
     html_path = tmp_path / "restriction.html"
     html_path.write_text(_REALISTIC_BANDAI_HTML, encoding="utf-8")
 
+    # By default, ingests active (5) and upcoming (3) separately.
     exit_code = cli_main(["--db", str(db_path), "banlist", str(html_path)])
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "Ingested 5 card restriction(s)" in out
-    assert "banned=2, restricted=0, pair_banned=3" in out
+    assert "banned=2, restricted=0, pair_banned=3, upcoming=3" in out
     assert "effective_date=2026-10-12" in out
+    assert "upcoming_effective_date=2026-11-27" in out
 
-    # Re-run with --include-upcoming adds EB05-001, OP13-001, OP01-002.
-    exit_code_up = cli_main(
-        ["--db", str(db_path), "banlist", str(html_path), "--include-upcoming"]
+    with connect(db_path) as conn:
+        active_count = conn.execute(
+            "SELECT COUNT(*) FROM card_restrictions WHERE scope = 'active'"
+        ).fetchone()[0]
+        upcoming_count = conn.execute(
+            "SELECT COUNT(*) FROM card_restrictions WHERE scope = 'upcoming'"
+        ).fetchone()[0]
+        assert active_count == 5
+        assert upcoming_count == 3
+
+    # Re-run with --no-include-upcoming removes the 3 upcoming rows while keeping the 5 active rows.
+    exit_code_no_up = cli_main(
+        ["--db", str(db_path), "banlist", str(html_path), "--no-include-upcoming"]
     )
-    assert exit_code_up == 0
-    out_up = capsys.readouterr().out
-    assert "Ingested 8 card restriction(s)" in out_up
-    assert "effective_date=2026-11-27" in out_up
+    assert exit_code_no_up == 0
+    out_no_up = capsys.readouterr().out
+    assert "Ingested 5 card restriction(s)" in out_no_up
+    assert "removed=3" in out_no_up
+    assert "upcoming=0" in out_no_up
+    assert "upcoming_effective_date=none" in out_no_up
 
     with connect(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM card_restrictions").fetchone()[0]
-        assert count == 8
+        assert count == 5

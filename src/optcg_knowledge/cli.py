@@ -74,12 +74,23 @@ def _format_status_report(db_path: Path, payload: dict[str, object]) -> str:
     timestamps = payload["timestamps"]
     assert isinstance(timestamps, dict)
 
+    upcoming_eff = payload.get("banlist_upcoming_effective_date")
+    upcoming_suffix = f", upcoming={upcoming_eff}" if upcoming_eff else ""
     banlist_label = (
-        f"loaded (effective={payload['banlist_effective_date'] or 'unknown'}, "
-        f"source={payload['banlist_source'] or 'unknown'})"
+        f"loaded (effective={payload['banlist_effective_date'] or 'unknown'}"
+        f"{upcoming_suffix}, source={payload['banlist_source'] or 'unknown'})"
         if payload["banlist_loaded"]
         else "not loaded"
     )
+    upcoming_restrictions = restrictions.get("upcoming")
+    upcoming_counts_suffix = ""
+    if isinstance(upcoming_restrictions, dict) and upcoming_restrictions.get("total", 0):
+        upcoming_counts_suffix = (
+            f", upcoming={upcoming_restrictions['total']} "
+            f"[banned={upcoming_restrictions['banned']}, "
+            f"restricted={upcoming_restrictions['restricted']}, "
+            f"pair_banned={upcoming_restrictions['pair_banned']}]"
+        )
     lines = [
         f"OPTCG Knowledge Base Status ({db_path})",
         "Versions & Config:",
@@ -105,7 +116,7 @@ def _format_status_report(db_path: Path, payload: dict[str, object]) -> str:
         (
             f"  card_restrictions: {restrictions['total']} "
             f"(banned={restrictions['banned']}, restricted={restrictions['restricted']}, "
-            f"pair_banned={restrictions['pair_banned']})"
+            f"pair_banned={restrictions['pair_banned']}{upcoming_counts_suffix})"
         ),
         (
             f"  rulings:           {rulings['total']} "
@@ -250,8 +261,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sync_parser.add_argument(
         "--include-upcoming",
-        action="store_true",
-        help="Also include scheduled future-effective announcements from official banlist HTML.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Include scheduled future-effective announcements in the separate upcoming "
+            "banlist scope (default: enabled; use --no-include-upcoming to skip)."
+        ),
     )
     sync_parser.add_argument(
         "--skip-faq",
@@ -469,8 +484,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     banlist_parser.add_argument(
         "--include-upcoming",
-        action="store_true",
-        help="Also include scheduled future-effective announcements from official Bandai HTML.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Include scheduled future-effective announcements in the separate upcoming "
+            "banlist scope (default: enabled; use --no-include-upcoming to skip)."
+        ),
     )
 
     embed_parser = subparsers.add_parser(
@@ -806,7 +825,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"banned={banlist_summary.banned_count}, "
             f"restricted={banlist_summary.restricted_count}, "
             f"pair_banned={banlist_summary.pair_banned_count}, "
+            f"upcoming={banlist_summary.upcoming_restrictions_upserted}, "
             f"effective_date={banlist_summary.effective_date or 'unknown'}, "
+            f"upcoming_effective_date={banlist_summary.upcoming_effective_date or 'none'}, "
             f"source={banlist_summary.source_name})"
         )
         return 0

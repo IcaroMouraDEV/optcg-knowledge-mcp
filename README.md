@@ -102,11 +102,11 @@ uv run optcg-ingest cards --source local --path data/raw/cards
 ```
 
 ### 4. Ingest official banlist / card restrictions
-Parses `data/raw/banlist/` (official Bandai HTML `restriction.html` and/or manual local `.json` files) into `card_restrictions` without touching `chunks_vec`:
+Parses `data/raw/banlist/` (official Bandai HTML `restriction.html` and/or manual local `.json` files) into `card_restrictions` (separating active restrictions from scheduled future announcements) without touching `chunks_vec`:
 ```bash
 uv run optcg-ingest banlist
-# Optional: include scheduled future-effective announcements from the official HTML
-uv run optcg-ingest banlist --include-upcoming
+# Optional: skip scheduled future-effective announcements from the official HTML
+uv run optcg-ingest banlist --no-include-upcoming
 ```
 
 ### 5. Ingest official FAQs & errata (`authority = 2`)
@@ -173,9 +173,9 @@ Date: 2026-11-18
 | **Query** | `search` | Hybrid search (exact OPTCG tokens + FTS5 BM25 + `sqlite-vec` + RRF + authority/tier tie-breaking) |
 | **Query** | `get_rule` | Look up a Comprehensive Rule by `rule_id` with ancestors and ordered children |
 | **Query** | `get_trm_section` | Look up a Tournament Rules Manual section by `section_id` (`TRM-7.4.1`) with ancestors and children |
-| **Query** | `get_card` | Look up canonical card(s) by exact `card_id` or fuzzy name, including official banlist legality |
-| **Query** | `search_cards` | Filter cards by `name`, `color`, `cost`, `trait`, `keyword`, `set_code`, and `ban_status` |
-| **Query** | `get_banlist` | Retrieve the full official Bandai banlist (`banned`, `restricted`, `pair_banned`) in one call |
+| **Query** | `get_card` | Look up canonical card(s) by exact `card_id` or fuzzy name, including active banlist legality and `upcoming_restriction` |
+| **Query** | `search_cards` | Filter cards by `name`, `color`, `cost`, `trait`, `keyword`, `set_code`, and active `ban_status` |
+| **Query** | `get_banlist` | Retrieve the official Bandai banlist (`banned`, `restricted`, `pair_banned`) and separate `upcoming` announcements in one call |
 | **Query** | `get_card_rulings` | List rulings linked to a `card_id` ordered by `authority`, `judge_tier`, `date DESC` |
 | **Curation** | `add_ruling` | Insert anonymized curated ruling (`reviewed=False`), indexed immediately in FTS5 |
 | **Curation** | `mark_ruling` | Update `reviewed`, `superseded_by` (cycle-checked), and/or `judge_tier` |
