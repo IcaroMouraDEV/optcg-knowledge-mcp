@@ -13,6 +13,7 @@ import pymupdf
 from optcg_knowledge.db.models import TrmSectionRecord
 from optcg_knowledge.db.schema import set_meta, utc_now_iso
 from optcg_knowledge.ingest.chunking import build_trm_chunk, upsert_chunks
+from optcg_knowledge.ingest.dates import normalize_official_date
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +29,12 @@ _TOC_LINE_RE = re.compile(r"^.*(?:\.{3,}\s*|\s{3,})\d{1,3}\s*$")
 _INFRACTION_ITEM_RE = re.compile(r"^(\d{1,2})\.\s+([A-Z][^\n]{2,110})$")
 _INFRACTION_SIGNAL_RE = re.compile(r"\b(?:Penalty|Resolution)\s*:", re.IGNORECASE)
 
-_VERSION_RE = re.compile(r"\b(?:Ver\.?|Version)\s*(\d+(?:\.\d+)*)\b", re.IGNORECASE)
+_VERSION_RE = re.compile(r"\b(?:Ver\.?|Version)\s*[:\-]?\s*(\d+(?:\.\d+)*)\b", re.IGNORECASE)
 _EFFECTIVE_DATE_RE = re.compile(
     r"(?:Last\s+Updated|Effective(?:\s+Date)?|Updated)\s*[:\-]?\s*"
-    r"([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2})",
+    r"([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}"
+    r"|\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"
+    r"|\d{1,2}/\d{1,2}/\d{4})",
     re.IGNORECASE,
 )
 
@@ -168,17 +171,17 @@ def _extract_metadata(
 ) -> tuple[str | None, str | None]:
     header_sample = "\n".join(lines[:60])
 
-    detected_version = trm_version
+    detected_version = trm_version.strip() if trm_version and trm_version.strip() else None
     if detected_version is None:
         match = _VERSION_RE.search(header_sample)
         if match:
             detected_version = match.group(1)
 
-    detected_date = effective_date
+    detected_date = normalize_official_date(effective_date)
     if detected_date is None:
         match = _EFFECTIVE_DATE_RE.search(header_sample)
         if match:
-            detected_date = match.group(1).strip()
+            detected_date = normalize_official_date(match.group(1))
 
     return (detected_version, detected_date)
 

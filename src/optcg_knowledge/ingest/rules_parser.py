@@ -13,15 +13,18 @@ import pymupdf
 from optcg_knowledge.db.models import RuleRecord
 from optcg_knowledge.db.schema import set_meta, utc_now_iso
 from optcg_knowledge.ingest.chunking import build_rule_chunk, upsert_chunks
+from optcg_knowledge.ingest.dates import normalize_official_date
 
 logger = logging.getLogger(__name__)
 
 _RULE_LINE_RE = re.compile(r"^(\d+(?:-\d+)*)\.\s+(.*)$")
 _TOC_LINE_RE = re.compile(r"^\d+(?:-\d+)*\.\s+.*(?:\.{2,}|\s{3,})\d+\s*$")
-_VERSION_RE = re.compile(r"\bVer\.?\s*(\d+(?:\.\d+)*)\b", re.IGNORECASE)
+_VERSION_RE = re.compile(r"\b(?:Ver\.?|Version)\s*[:\-]?\s*(\d+(?:\.\d+)*)\b", re.IGNORECASE)
 _EFFECTIVE_DATE_RE = re.compile(
-    r"(?:Effective(?:\s+Date)?|Last\s+Updated)\s*[:\-]?\s*"
-    r"([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{4}/\d{1,2}/\d{1,2})",
+    r"(?:Effective(?:\s+Date)?|Last\s+Updated|Updated)\s*[:\-]?\s*"
+    r"([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}"
+    r"|\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"
+    r"|\d{1,2}/\d{1,2}/\d{4})",
     re.IGNORECASE,
 )
 _NOISE_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -29,7 +32,10 @@ _NOISE_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^-\s*\d{1,3}\s*-$"),
     re.compile(r"^Page\s+\d+(?:\s+of\s+\d+)?$", re.IGNORECASE),
     re.compile(r"^ONE\s+PIECE\s+CARD\s+GAME\s+Comprehensive\s+Rules.*$", re.IGNORECASE),
-    re.compile(r"^Comprehensive\s+Rules(?:\s+Ver\.?\s*\d+(?:\.\d+)*)?$", re.IGNORECASE),
+    re.compile(
+        r"^Comprehensive\s+Rules(?:\s+(?:Ver\.?|Version)\s*[:\-]?\s*\d+(?:\.\d+)*)?$",
+        re.IGNORECASE,
+    ),
     re.compile(r"^©.*(?:Eiichiro\s+Oda|Shueisha|Bandai).*$", re.IGNORECASE),
 )
 _PRESERVE_BREAK_PREFIXES = ("Example:", "Note:", "※", "•", "-", "*")
@@ -79,17 +85,17 @@ def _extract_metadata(
     effective_date: str | None,
 ) -> tuple[str | None, str | None]:
     header_sample = "\n".join(lines[:80])
-    detected_version = rules_version
+    detected_version = rules_version.strip() if rules_version and rules_version.strip() else None
     if detected_version is None:
         match = _VERSION_RE.search(header_sample)
         if match:
             detected_version = match.group(1)
 
-    detected_date = effective_date
+    detected_date = normalize_official_date(effective_date)
     if detected_date is None:
         match = _EFFECTIVE_DATE_RE.search(header_sample)
         if match:
-            detected_date = match.group(1).strip()
+            detected_date = normalize_official_date(match.group(1))
 
     return detected_version, detected_date
 
