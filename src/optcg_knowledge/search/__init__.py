@@ -1,0 +1,20 @@
+"""Hybrid retrieval and structured query functions for optcg-knowledge."""
+
+from optcg_knowledge.search.hybrid import hybrid_search
+from optcg_knowledge.search.queries import get_card, get_card_rulings, get_rule, search_cards
+from optcg_knowledge.search.query_parser import (
+    DetectedTokens,
+    build_fts_queries,
+    detect_query_tokens,
+)
+
+__all__ = [
+    "DetectedTokens",
+    "build_fts_queries",
+    "detect_query_tokens",
+    "get_card",
+    "get_card_rulings",
+    "get_rule",
+    "hybrid_search",
+    "search_cards",
+]
