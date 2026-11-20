@@ -87,15 +87,21 @@ uv run optcg-ingest embed
 ```
 Useful flags: `--batch-size 8`, `--device auto|cuda|cpu`, `--fp16/--no-fp16`, `--force`. Only new or modified chunks (tracked via `content_hash`) are embedded.
 
-### 6. Export vetted rulings as stable JSON
-```bash
-# Write to file
-uv run optcg-ingest export-rulings --out rulings.json
+### 6. Import & export curated rulings (collaborative JSON workflow)
+Tracked, anonymized judge rulings live in `data/rulings/` (`TEMPLATE.md`, `threads/`, and `judge_rulings.json`) so collaborators can contribute new rulings via Pull Requests without committing raw Bandai PDFs or un-anonymized chat logs:
 
-# Filter by card, date, or authority (<= N)
-uv run optcg-ingest export-rulings --card-id OP05-119 --min-authority 3 --since 2025-01-01
+```bash
+# Import curated judge rulings from the repository into your local DB
+uv run optcg-ingest import-rulings data/rulings/judge_rulings.json
+uv run optcg-ingest embed
+
+# Export only curated judge rulings back to the repository after curating & approving
+uv run optcg-ingest export-rulings --source judge --out data/rulings/judge_rulings.json
+
+# Export vetted rulings for downstream consumers (e.g., optcg-engine)
+uv run optcg-ingest export-rulings --card-id OP05-119 --min-authority 3 --since 2025-01-01 --out rulings.json
 ```
-By default exports only `reviewed = True`, non-superseded rulings. Pass `--include-superseded` and/or `--include-unreviewed` to include them.
+By default `export-rulings` exports only `reviewed = True`, non-superseded rulings. Pass `--include-superseded` and/or `--include-unreviewed` to include them.
 
 ---
 

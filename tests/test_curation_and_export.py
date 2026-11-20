@@ -15,6 +15,7 @@ from optcg_knowledge.curation import (
     EXPORT_SCHEMA_VERSION,
     add_ruling,
     export_rulings,
+    import_rulings,
     list_unreviewed_rulings,
     mark_ruling,
 )
@@ -327,6 +328,7 @@ def test_export_rulings_schema_mcp_and_cli_parity(
         "card_id": "OP05-119",
         "since": None,
         "min_authority": 3,
+        "source": None,
         "include_superseded": False,
         "include_unreviewed": False,
     }
@@ -451,3 +453,77 @@ def test_mcp_curation_tools_and_curar_prompt_zero_stdout_leak(
         build_curar_prompt("../secrets.txt")
     with pytest.raises(ValueError, match="relative path"):
         build_curar_prompt("/etc/passwd")
+
+
+def test_import_rulings_roundtrip_idempotency_and_cli(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, source_conn, embedder = populated_db
+
+    # Add two judge rulings where older is superseded by newer (tier_0).
+    old_id = add_ruling(
+        source_conn,
+        question="Old Tier 1 answer for OP05-119?",
+        answer="Old answer.",
+        source="judge",
+        date="2025-01-01",
+        card_ids=["OP05-119"],
+        rule_refs=["7-1-1-1"],
+        judge_tier="tier_1",
+    )["ruling_id"]
+    new_id = add_ruling(
+        source_conn,
+        question="Updated Tier 0 answer for OP05-119?",
+        answer="Authoritative Tier 0 answer.",
+        source="judge",
+        date="2026-11-18",
+        card_ids=["OP05-119"],
+        rule_refs=["7-1-1-1"],
+        judge_tier="tier_0",
+    )["ruling_id"]
+    mark_ruling(source_conn, new_id, reviewed=True)
+    mark_ruling(source_conn, old_id, reviewed=True, superseded_by=new_id)
+
+    exported = export_rulings(source_conn, source="judge", include_superseded=True)
+    assert exported["filters"]["source"] == "judge"
+    assert exported["total"] >= 2
+    assert all(r["source"] == "judge" for r in exported["rulings"])
+
+    # Import into a completely fresh DB and verify two-pass superseded_by & FTS5 indexing.
+    fresh_db = tmp_path / "fresh_import.db"
+    export_file = tmp_path / "judge_rulings.json"
+    export_file.write_text(json.dumps(exported, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    exit_code = cli_main(["--db", str(fresh_db), "import-rulings", str(export_file)])
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    assert f"Imported {exported['total']} rulings from 1 file(s)" in stdout
+
+    with connect(fresh_db, init=False) as conn:
+        embed_chunks(conn, embedder)
+        # Re-importing the exact same JSON is idempotent and preserves embedded_hash.
+        summary2 = import_rulings(conn, export_file)
+        assert summary2.rulings_upserted == exported["total"]
+        assert summary2.superseded_links_applied >= 1
+
+        embed_again = embed_chunks(conn, embedder)
+        assert embed_again.embedded_chunks == 0
+        assert embed_again.skipped_chunks == exported["total"]
+
+        old_row = conn.execute(
+            "SELECT superseded_by, judge_tier, reviewed FROM rulings WHERE ruling_id = ?",
+            (old_id,),
+        ).fetchone()
+        assert old_row is not None
+        assert old_row["superseded_by"] == new_id
+        assert old_row["judge_tier"] == "tier_1"
+        assert old_row["reviewed"] == 1
+
+    # Also verify the repository's tracked data/rulings/judge_rulings.json imports cleanly.
+    repo_rulings = Path(__file__).resolve().parents[1] / "data" / "rulings" / "judge_rulings.json"
+    assert repo_rulings.is_file()
+    tracked_db = tmp_path / "tracked_import.db"
+    assert cli_main(["--db", str(tracked_db), "import-rulings", str(repo_rulings)]) == 0
+    capsys.readouterr()

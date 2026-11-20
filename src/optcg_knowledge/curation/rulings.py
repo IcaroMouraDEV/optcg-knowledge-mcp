@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from optcg_knowledge.db.models import (
@@ -17,7 +20,7 @@ from optcg_knowledge.db.models import (
     authority_for_source,
     normalize_judge_tier,
 )
-from optcg_knowledge.db.schema import get_meta, utc_now_iso
+from optcg_knowledge.db.schema import get_meta, set_meta, utc_now_iso
 from optcg_knowledge.ingest.chunking import build_ruling_chunk, upsert_chunks
 
 logger = logging.getLogger(__name__)
@@ -619,6 +622,7 @@ def export_rulings(
     card_id: str | None = None,
     since: str | None = None,
     min_authority: int | None = None,
+    source: str | None = None,
     include_superseded: bool = False,
     include_unreviewed: bool = False,
 ) -> dict[str, Any]:
@@ -638,6 +642,14 @@ def export_rulings(
     ):
         raise ValueError("min_authority must be an integer between 1 (highest) and 4 (lowest)")
 
+    normalized_source: str | None = None
+    if source is not None and source.strip():
+        cleaned_source = source.strip().lower()
+        if cleaned_source not in CURATABLE_SOURCES:
+            valid = ", ".join(sorted(CURATABLE_SOURCES))
+            raise ValueError(f"Unsupported source filter {source!r}; expected one of: {valid}")
+        normalized_source = cleaned_source
+
     clauses: list[str] = []
     params: list[Any] = []
     join_sql = ""
@@ -654,6 +666,10 @@ def export_rulings(
     if min_authority is not None:
         clauses.append("r.authority <= ?")
         params.append(min_authority)
+
+    if normalized_source is not None:
+        clauses.append("r.source = ?")
+        params.append(normalized_source)
 
     if not include_superseded:
         clauses.append("r.superseded_by IS NULL")
@@ -700,9 +716,262 @@ def export_rulings(
             "card_id": normalized_card_id,
             "since": normalized_since,
             "min_authority": min_authority,
+            "source": normalized_source,
             "include_superseded": include_superseded,
             "include_unreviewed": include_unreviewed,
         },
         "total": len(rulings),
         "rulings": rulings,
     }
+
+
+@dataclass(frozen=True, slots=True)
+class ImportRulingsSummary:
+    """Counters returned after importing exported rulings JSON into SQLite."""
+
+    files_processed: int
+    rulings_upserted: int
+    card_links_upserted: int
+    rule_links_upserted: int
+    superseded_links_applied: int
+    chunks_upserted: int
+
+
+def _load_ruling_items_from_path(path: Path) -> tuple[int, list[dict[str, Any]]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Rulings JSON path not found: {path}")
+
+    files = (
+        [path]
+        if path.is_file()
+        else sorted(p for p in path.rglob("*.json") if p.is_file())
+    )
+    if not files:
+        raise FileNotFoundError(f"No .json rulings files found in {path}")
+
+    items: list[dict[str, Any]] = []
+    for file_path in files:
+        parsed = json.loads(file_path.read_text(encoding="utf-8"))
+        if isinstance(parsed, dict) and isinstance(parsed.get("rulings"), list):
+            items.extend(parsed["rulings"])
+        elif isinstance(parsed, list):
+            items.extend(parsed)
+        else:
+            raise ValueError(
+                f"Invalid rulings JSON format in {file_path}: expected object with 'rulings' list"
+            )
+    return len(files), items
+
+
+def import_rulings(
+    conn: sqlite3.Connection,
+    source_input: Path | str | dict[str, Any] | Sequence[dict[str, Any]],
+) -> ImportRulingsSummary:
+    """Idempotently import exported rulings JSON (e.g. ``data/rulings/judge_rulings.json``).
+
+    Enforces privacy guards, authority mapping, ``judge_tier`` validation, preserves existing
+    ``superseded_by`` links and ``embedded_hash`` for unchanged chunks, and applies new
+    ``superseded_by`` links in a second pass after all rulings exist.
+    """
+    if isinstance(source_input, (Path, str)):
+        files_processed, raw_items = _load_ruling_items_from_path(Path(source_input))
+    elif isinstance(source_input, dict):
+        raw_list = source_input.get("rulings")
+        if not isinstance(raw_list, list):
+            raise ValueError("Expected rulings payload dict with a 'rulings' list")
+        files_processed = 1
+        raw_items = raw_list
+    else:
+        files_processed = 1
+        raw_items = list(source_input)
+
+    records_by_id: dict[str, RulingRecord] = {}
+    pending_superseded: list[tuple[str, str]] = []
+
+    for item in raw_items:
+        if not isinstance(item, dict):
+            raise ValueError("Each ruling entry in JSON must be an object")
+
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if not question or not answer:
+            raise ValueError("Imported ruling entry must have non-empty question and answer")
+
+        raw_source = str(item.get("source") or "").strip().lower()
+        if raw_source not in CURATABLE_SOURCES:
+            valid = ", ".join(sorted(CURATABLE_SOURCES))
+            raise ValueError(f"Unsupported imported source {raw_source!r}; expected: {valid}")
+        typed_source: SourceType = raw_source  # type: ignore[assignment]
+        authority = authority_for_source(typed_source)
+
+        normalized_tier = normalize_judge_tier(
+            str(item["judge_tier"]) if item.get("judge_tier") is not None else None
+        )
+        if normalized_tier is not None and typed_source != "judge":
+            raise ValueError("judge_tier can only be set when source == 'judge'")
+
+        _check_no_pii(question, field_name="question")
+        _check_no_pii(answer, field_name="answer")
+        raw_ref_val = str(item["raw_ref"]).strip() if item.get("raw_ref") else None
+        _check_no_pii(raw_ref_val, field_name="raw_ref", check_discriminator=False)
+
+        date_val = _normalize_date(
+            str(item["date"]) if item.get("date") is not None else None,
+            field_name="date",
+        )
+        card_ids = _normalize_card_ids(item.get("card_ids"))
+        rule_ids = _normalize_rule_refs(item.get("rule_ids") or item.get("rule_refs"))
+
+        ruling_id_raw = str(item.get("ruling_id") or "").strip()
+        ruling_id = ruling_id_raw or make_curated_ruling_id(
+            source=typed_source,
+            card_ids=card_ids,
+            question=question,
+            date=date_val,
+        )
+
+        superseded_by_val = (
+            str(item["superseded_by"]).strip() if item.get("superseded_by") else None
+        )
+        if superseded_by_val:
+            pending_superseded.append((ruling_id, superseded_by_val))
+
+        reviewed_val = bool(item.get("reviewed", True))
+        rules_version_val = (
+            str(item["rules_version"]).strip() if item.get("rules_version") else None
+        )
+        url_val = str(item["url"]).strip() if item.get("url") else None
+
+        records_by_id[ruling_id] = RulingRecord(
+            ruling_id=ruling_id,
+            question=question,
+            answer=answer,
+            source=typed_source,
+            authority=authority,
+            date=date_val,
+            rules_version=rules_version_val,
+            url=url_val,
+            superseded_by=None,
+            reviewed=reviewed_val,
+            raw_ref=raw_ref_val,
+            judge_tier=normalized_tier,
+            card_ids=card_ids,
+            rule_ids=rule_ids,
+        )
+
+    if not records_by_id:
+        return ImportRulingsSummary(
+            files_processed=files_processed,
+            rulings_upserted=0,
+            card_links_upserted=0,
+            rule_links_upserted=0,
+            superseded_links_applied=0,
+            chunks_upserted=0,
+        )
+
+    ruling_rows = [
+        (
+            rec.ruling_id,
+            rec.question,
+            rec.answer,
+            rec.source,
+            rec.authority,
+            rec.judge_tier,
+            rec.date,
+            rec.rules_version,
+            rec.url,
+            1 if rec.reviewed else 0,
+            rec.raw_ref,
+        )
+        for rec in records_by_id.values()
+    ]
+    chunks = [build_ruling_chunk(rec) for rec in records_by_id.values()]
+
+    card_links_upserted = 0
+    rule_links_upserted = 0
+    superseded_applied = 0
+
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO rulings (
+                ruling_id, question, answer, source, authority, judge_tier,
+                date, rules_version, url, superseded_by, reviewed, raw_ref
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            ON CONFLICT(ruling_id) DO UPDATE SET
+                question = excluded.question,
+                answer = excluded.answer,
+                source = excluded.source,
+                authority = excluded.authority,
+                judge_tier = COALESCE(excluded.judge_tier, rulings.judge_tier),
+                date = COALESCE(excluded.date, rulings.date),
+                rules_version = COALESCE(excluded.rules_version, rulings.rules_version),
+                url = COALESCE(excluded.url, rulings.url),
+                superseded_by = rulings.superseded_by,
+                reviewed = MAX(rulings.reviewed, excluded.reviewed),
+                raw_ref = COALESCE(excluded.raw_ref, rulings.raw_ref)
+            """,
+            ruling_rows,
+        )
+
+        for rec in records_by_id.values():
+            conn.execute("DELETE FROM ruling_cards WHERE ruling_id = ?", (rec.ruling_id,))
+            if rec.card_ids:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO ruling_cards (ruling_id, card_id) VALUES (?, ?)",
+                    [(rec.ruling_id, cid) for cid in rec.card_ids],
+                )
+                card_links_upserted += len(rec.card_ids)
+
+            conn.execute("DELETE FROM ruling_rules WHERE ruling_id = ?", (rec.ruling_id,))
+            if rec.rule_ids:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO ruling_rules (ruling_id, rule_id) VALUES (?, ?)",
+                    [(rec.ruling_id, rid) for rid in rec.rule_ids],
+                )
+                rule_links_upserted += len(rec.rule_ids)
+
+        for ruling_id, target_id in pending_superseded:
+            if target_id == ruling_id:
+                raise ValueError(f"Imported ruling {ruling_id!r} cannot supersede itself")
+            exists = conn.execute(
+                "SELECT 1 FROM rulings WHERE ruling_id = ?",
+                (target_id,),
+            ).fetchone()
+            if exists is None:
+                logger.warning(
+                    "Skipping superseded_by=%r for imported ruling %r because target ruling "
+                    "is not present in this database yet",
+                    target_id,
+                    ruling_id,
+                )
+                continue
+            if _has_superseding_cycle(conn, ruling_id=ruling_id, target_id=target_id):
+                raise ValueError(
+                    f"Imported ruling {ruling_id!r} -> {target_id!r} creates a superseding cycle"
+                )
+            conn.execute(
+                "UPDATE rulings SET superseded_by = ? WHERE ruling_id = ?",
+                (target_id, ruling_id),
+            )
+            superseded_applied += 1
+
+        chunks_upserted = upsert_chunks(conn, chunks)
+        set_meta(conn, "last_ingested_at", utc_now_iso())
+
+    logger.info(
+        "Imported %d rulings from %d file(s) (card_links=%d, rule_links=%d, superseded=%d)",
+        len(ruling_rows),
+        files_processed,
+        card_links_upserted,
+        rule_links_upserted,
+        superseded_applied,
+    )
+    return ImportRulingsSummary(
+        files_processed=files_processed,
+        rulings_upserted=len(ruling_rows),
+        card_links_upserted=card_links_upserted,
+        rule_links_upserted=rule_links_upserted,
+        superseded_links_applied=superseded_applied,
+        chunks_upserted=chunks_upserted,
+    )

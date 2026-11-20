@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from optcg_knowledge.config import Settings, get_settings
-from optcg_knowledge.curation.rulings import export_rulings
+from optcg_knowledge.curation.rulings import export_rulings, import_rulings
 from optcg_knowledge.db import init_schema, migrate_schema, open_db
 from optcg_knowledge.ingest.cards_importer import ingest_cards
 from optcg_knowledge.ingest.embed_pipeline import embed_chunks
@@ -207,6 +207,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter exported rulings with authority <= N (1=rules .. 4=community).",
     )
     export_parser.add_argument(
+        "--source",
+        choices=("official_faq", "errata", "judge", "community"),
+        default=None,
+        help="Filter exported rulings by exact source type (e.g., judge).",
+    )
+    export_parser.add_argument(
         "--include-superseded",
         action="store_true",
         help="Include rulings marked with superseded_by.",
@@ -215,6 +221,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--include-unreviewed",
         action="store_true",
         help="Include rulings that have not been reviewed yet (reviewed=False).",
+    )
+
+    import_parser = subparsers.add_parser(
+        "import-rulings",
+        help="Idempotently import curated rulings JSON (default: data/rulings).",
+    )
+    import_parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Rulings JSON file or directory (defaults to data/rulings).",
     )
 
     return parser
@@ -366,6 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 card_id=args.card_id,
                 since=args.since,
                 min_authority=args.min_authority,
+                source=args.source,
                 include_superseded=args.include_superseded,
                 include_unreviewed=args.include_unreviewed,
             )
@@ -377,6 +396,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Exported {payload['total']} rulings to {args.out}")
         else:
             print(serialized)
+        return 0
+
+    if args.command == "import-rulings":
+        import_path = args.path or (settings.db_path.parent / "rulings")
+        with open_db(settings.db_path, init=False) as conn:
+            has_rulings = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rulings'"
+            ).fetchone()
+            if has_rulings is None:
+                init_schema(
+                    conn,
+                    embedding_model=settings.embedding_model,
+                    embedding_dim=settings.embedding_dim,
+                )
+            else:
+                with conn:
+                    migrate_schema(conn)
+
+            summary = import_rulings(conn, import_path)
+        print(
+            f"Imported {summary.rulings_upserted} rulings from {summary.files_processed} file(s) "
+            f"(card_links={summary.card_links_upserted}, rule_links={summary.rule_links_upserted}, "
+            f"superseded={summary.superseded_links_applied}, chunks={summary.chunks_upserted})"
+        )
         return 0
 
     parser.error(f"Unsupported command: {args.command}")

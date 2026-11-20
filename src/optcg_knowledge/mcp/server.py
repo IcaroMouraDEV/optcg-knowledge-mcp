@@ -364,14 +364,16 @@ def create_server(
         description=(
             "Export rulings in a stable, versioned JSON envelope (shared with `optcg-ingest "
             "export-rulings`) for downstream consumers such as optcg-engine. Defaults to reviewed, "
-            "non-superseded rulings; filter optionally by card_id, since (YYYY-MM-DD), and "
-            "min_authority (authority <= N)."
+            "non-superseded rulings; filter optionally by card_id, since (YYYY-MM-DD), "
+            "min_authority (authority <= N), and source "
+            "('official_faq'|'errata'|'judge'|'community')."
         ),
     )
     def export_rulings(
         card_id: str | None = None,
         since: str | None = None,
         min_authority: int | None = None,
+        source: str | None = None,
         include_superseded: bool = False,
         include_unreviewed: bool = False,
     ) -> dict[str, Any]:
@@ -382,6 +384,7 @@ def create_server(
                 card_id=card_id,
                 since=since,
                 min_authority=min_authority,
+                source=source,
                 include_superseded=include_superseded,
                 include_unreviewed=include_unreviewed,
             )
