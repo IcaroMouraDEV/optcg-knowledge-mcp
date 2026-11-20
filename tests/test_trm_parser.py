@@ -141,7 +141,7 @@ def test_parse_trm_pdf_roundtrip_toc_duplicate_heading_and_infraction_split(
     pdf_path = _write_synthetic_trm_pdf(tmp_path / "tournament_rules_manual.pdf")
     parsed = parse_trm_pdf(pdf_path)
 
-    assert parsed.effective_date == "October 17, 2025"
+    assert parsed.effective_date == "2025-10-17"
     assert parsed.trm_version is None
 
     by_id = {sec.section_id: sec for sec in parsed.sections}
@@ -200,7 +200,7 @@ def test_ingest_trm_idempotency_stale_cleanup_and_isolation_from_rules(
     assert first.sections_upserted == 14
     assert first.sections_removed == 0
     assert first.chunks_upserted == 14
-    assert get_meta(db_conn, "trm_effective_date") == "October 17, 2025"
+    assert get_meta(db_conn, "trm_effective_date") == "2025-10-17"
     assert get_meta(db_conn, "trm_last_ingested_at") is not None
 
     embedder = HashEmbedder(dimension=64)
@@ -318,7 +318,7 @@ def test_trm_hybrid_search_exact_tokens_doc_types_and_get_trm_section(
     assert sec["found"] is True
     assert sec["section_id"] == "TRM-7.4.1"
     assert sec["source"] == "tournament_rules"
-    assert sec["trm_effective_date"] == "October 17, 2025"
+    assert sec["trm_effective_date"] == "2025-10-17"
     assert [a["section_id"] for a in sec["ancestors"]] == ["TRM-7.0", "TRM-7.4"]
     assert [c["section_id"] for c in sec["children"]] == ["TRM-7.4.1.1", "TRM-7.4.1.2"]
 
@@ -365,9 +365,26 @@ def test_cli_trm_command_roundtrip(
     stdout = capsys.readouterr().out
     assert "Ingested 14 TRM sections" in stdout
     assert "version=2025.10" in stdout
-    assert "effective_date=October 17, 2025" in stdout
+    assert "effective_date=2025-10-17" in stdout
 
     with open_db(db_path, init=False) as conn:
         assert get_meta(conn, "trm_version") == "2025.10"
-        assert get_meta(conn, "trm_effective_date") == "October 17, 2025"
+        assert get_meta(conn, "trm_effective_date") == "2025-10-17"
         assert conn.execute("SELECT COUNT(*) FROM trm_sections").fetchone()[0] == 14
+
+
+def test_parse_trm_supports_mdy_date_and_three_part_version() -> None:
+    raw = (
+        "BANDAI ORGANIZED PLAY\n"
+        "One Piece Card Game Tournament Rules Manual\n"
+        "Version: 2.1.0\n"
+        "Last updated: 8/28/2026\n"
+        "1.0 Event Participants\n"
+        "All participants must follow official guidelines.\n"
+    )
+    parsed = parse_trm_text(raw)
+    assert parsed.trm_version == "2.1.0"
+    assert parsed.effective_date == "2026-08-28"
+    assert len(parsed.sections) == 1
+    assert parsed.sections[0].trm_version == "2.1.0"
+    assert parsed.sections[0].effective_date == "2026-08-28"

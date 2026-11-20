@@ -382,7 +382,7 @@ def _build_parser() -> argparse.ArgumentParser:
     trm_parser.add_argument(
         "--effective-date",
         default=None,
-        help="Override detected Last Updated / effective date (e.g., October 17, 2025).",
+        help="Override detected Last Updated / effective date (e.g., 2025-10-17).",
     )
 
     cards_parser = subparsers.add_parser(
