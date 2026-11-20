@@ -1,0 +1,21 @@
+ONE PIECE CARD GAME Official Card Errata
+Comprehensive Rules Ver. 1.24
+Updated: 2025/09/05
+©Eiichiro Oda/Shueisha, Toei Animation
+
+OP01-016 Nami
+Effective Date: 2023-03-10
+Before:
+[On Play] Look at 5 cards from the top of your deck; reveal up to 1 Straw Hat Crew
+type card and add it to your hand.
+After:
+[On Play] Look at 5 cards from the top of your deck; reveal up to 1 {Straw Hat Crew}
+type card other than [Nami] and add it to your hand.
+Note: Added "other than [Nami]" to match the Japanese card text.
+
+Card No.: ST10-001
+Card Name: Trafalgar Law
+Incorrect: [Activate: Main] Place 1 of your opponent's Characters with 3000 power or less
+at the bottom of the owner's deck.
+Corrected: [Activate: Main] [Once Per Turn] DON!! -3: Place up to 1 of your opponent's
+Characters with 3000 power or less at the bottom of the owner's deck. See Rule 7-1-2-1.

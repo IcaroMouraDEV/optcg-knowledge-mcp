@@ -6,6 +6,7 @@ from optcg_knowledge.db.models import (
     CardRecord,
     ChunkRecord,
     RuleRecord,
+    RulingRecord,
     authority_for_source,
 )
 from optcg_knowledge.db.schema import (
@@ -22,6 +23,7 @@ __all__ = [
     "CardRecord",
     "ChunkRecord",
     "RuleRecord",
+    "RulingRecord",
     "SCHEMA_VERSION",
     "authority_for_source",
     "connect",

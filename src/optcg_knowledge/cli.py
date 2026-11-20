@@ -13,6 +13,7 @@ from optcg_knowledge.db import open_db
 from optcg_knowledge.ingest.cards_importer import ingest_cards
 from optcg_knowledge.ingest.embed_pipeline import embed_chunks
 from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbedder
+from optcg_knowledge.ingest.faq_parser import ingest_faqs, parse_faq_path
 from optcg_knowledge.ingest.rules_parser import ingest_rules, parse_rules_pdf
 from optcg_knowledge.ingest.sources import CardSource, LocalCardSource, PunkRecordsSource
 
@@ -111,6 +112,40 @@ def _build_parser() -> argparse.ArgumentParser:
         "--packs",
         default=None,
         help="Comma-separated pack IDs to fetch for --source punk-records (e.g., OP01,OP05).",
+    )
+
+    faq_parser = subparsers.add_parser(
+        "faq",
+        help="Parse and ingest official Bandai FAQ/errata PDFs or text files (authority = 2).",
+    )
+    faq_parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="FAQ/errata PDF, text file, or directory (defaults to data/raw/faq).",
+    )
+    faq_parser.add_argument(
+        "--source",
+        choices=("auto", "official_faq", "errata"),
+        default="auto",
+        help="Override ruling source classification (default: auto-detect per file).",
+    )
+    faq_parser.add_argument(
+        "--date",
+        default=None,
+        help="Override detected publication/revision date (e.g., 2025-09-01).",
+    )
+    faq_parser.add_argument(
+        "--rules-version",
+        dest="rules_version",
+        default=None,
+        help="Override detected Comprehensive Rules version (defaults to NULL if absent).",
+    )
+    faq_parser.add_argument(
+        "--url",
+        default=None,
+        help="Optional official reference URL for the ingested FAQ/errata document.",
     )
 
     embed_parser = subparsers.add_parser(
@@ -218,6 +253,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"Ingested {summary.cards_upserted} canonical cards from {summary.source_name} "
             f"(raw={summary.raw_records_seen}, variants_merged={summary.variants_merged}, "
+            f"chunks={summary.chunks_upserted})"
+        )
+        return 0
+
+    if args.command == "faq":
+        faq_path = args.path or (settings.raw_data_dir / "faq")
+        docs = parse_faq_path(
+            faq_path,
+            source_mode=args.source,
+            date=args.date,
+            rules_version=args.rules_version,
+            url=args.url,
+        )
+        with open_db(
+            settings.db_path,
+            init=True,
+            embedding_model=settings.embedding_model,
+            embedding_dim=settings.embedding_dim,
+        ) as conn:
+            summary = ingest_faqs(conn, docs)
+        print(
+            f"Ingested {summary.rulings_upserted} official rulings from "
+            f"{summary.files_processed} file(s) "
+            f"(official_faq={summary.official_faq_count}, errata={summary.errata_count}, "
+            f"card_links={summary.card_links_upserted}, rule_links={summary.rule_links_upserted}, "
             f"chunks={summary.chunks_upserted})"
         )
         return 0

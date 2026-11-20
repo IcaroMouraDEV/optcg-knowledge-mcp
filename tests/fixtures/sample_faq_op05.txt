@@ -1,0 +1,29 @@
+ONE PIECE CARD GAME Official Card Q&A
+Updated: September 1, 2025
+©Eiichiro Oda/Shueisha, Toei Animation
+
+OP05-119 Monkey.D.Luffy
+Q1. If I activate this Character's [On Play] effect while ST10-001 is on my field,
+do I take an extra turn after the current End Phase?
+A1. Yes. According to Rule 7-1-4-1, the extra turn begins immediately after the
+current turn ends, provided you returned 10 DON!! cards to your DON!! deck.
+
+Q2
+Can I choose 1-2 cards when resolving an effect updated on 2025-09-01?
+A2
+Only when the card text explicitly permits choosing up to that many targets.
+
+Page 1 of 2
+
+OP01-029 Radical Beam!!
+Q3: Can I activate this Counter Event during the Counter Step if my opponent attacked P-001
+while EB01-001 and PRB01-001 are in play?
+A3: Yes. Refer to 10-1-1 and 9-9-9-9 for timing details during battle.
+
+General Rules Q&A
+Q4. How many times can [Blocker] be activated during a single battle?
+A4. Only once per battle (see Rules 7-1-4 and 7-1-5).
+A Character with [Blocker] must be rested to redirect the attack.
+
+Page 2 of 2
+©BANDAI CO.,LTD.
