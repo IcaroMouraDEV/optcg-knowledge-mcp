@@ -1,6 +1,6 @@
 # optcg-knowledge
 
-Local, data-only MCP server (Python 3.12 + `stdio`) providing a searchable knowledge base for the **One Piece Card Game (OPTCG)**: Comprehensive Rules, canonical cards, official Bandai FAQs & errata, and curated judge rulings with hybrid search (SQLite FTS5 BM25 + `sqlite-vec` local embeddings + Reciprocal Rank Fusion).
+Local, data-only MCP server (Python 3.12 + `stdio`) providing a searchable knowledge base for the **One Piece Card Game (OPTCG)**: Comprehensive Rules, Tournament Rules Manual (TRM), canonical cards with official banlist/restriction status, official Bandai FAQs & errata, and curated judge rulings with hybrid search (SQLite FTS5 BM25 + `sqlite-vec` local embeddings + Reciprocal Rank Fusion).
 
 `optcg-knowledge` never calls external/paid LLM or embedding APIs and contains no game-engine simulation logic. The connected agent (Claude Code, Antigravity, Gemini CLI) performs reasoning using structured tools and prompts exposed by this server.
 
@@ -12,7 +12,7 @@ Every rule and ruling follows a strict authority order:
 
 | `authority` | `source` | Description |
 | :--- | :--- | :--- |
-| `1` | `rules` | Official Comprehensive Rules (highest) |
+| `1` | `rules` / `tournament_rules` | Official Comprehensive Rules and Tournament Rules Manual (highest) |
 | `2` | `official_faq` / `errata` | Official Bandai card FAQs and errata |
 | `3` | `judge` | Certified Bandai judge rulings (`tier_0 > tier_2 > tier_1`) |
 | `4` | `community` | Community rulings (optional, lowest) |
@@ -49,16 +49,17 @@ Default local embedding model is `BAAI/bge-m3` (`1024` dims, FP16 on CUDA with `
 
 All ingestion commands are **idempotent** and safe to re-run without duplicating rows or re-embedding unchanged chunks. Raw Bandai PDFs/HTML and chat dumps live under `data/raw/` (gitignored).
 
-### 1. Download official Bandai rules, FAQ PDFs, and errata HTML
-Downloads the official Comprehensive Rules PDF (`data/raw/rules/rule_comprehensive.pdf`), all official FAQ PDFs (`data/raw/faq/*.pdf`), and the text-only errata HTML page (`data/raw/faq/errata_card.html`) directly from Bandai's English website (skips unchanged files on re-run, never downloads card images):
+### 1. Download official Bandai rules, TRM, FAQ PDFs, errata HTML, and banlist HTML
+Downloads the official Comprehensive Rules PDF (`data/raw/rules/rule_comprehensive.pdf`), Tournament Rules Manual PDF (`data/raw/rules/tournament_rules_manual.pdf`), all official FAQ PDFs (`data/raw/faq/*.pdf`), the text-only errata HTML page (`data/raw/faq/errata_card.html`), and the text-only restriction/banlist HTML page (`data/raw/banlist/restriction.html`) directly from Bandai's English website (skips unchanged files on re-run, never downloads card images):
 ```bash
 uv run optcg-ingest fetch-official
-# Or fetch only one category: --only rules | faq | errata
+# Or fetch only one category: --only rules | trm | faq | errata | banlist
 ```
 
-### 2. Ingest Comprehensive Rules PDF (`authority = 1`)
+### 2. Ingest Comprehensive Rules & Tournament Rules Manual (`authority = 1`)
 ```bash
 uv run optcg-ingest rules data/raw/rules/rule_comprehensive.pdf
+uv run optcg-ingest trm data/raw/rules/tournament_rules_manual.pdf
 ```
 
 ### 3. Ingest canonical cards (text/stats + `image_url` only)
@@ -73,7 +74,15 @@ Or from local JSON files in `data/raw/cards/`:
 uv run optcg-ingest cards --source local --path data/raw/cards
 ```
 
-### 4. Ingest official FAQs & errata (`authority = 2`)
+### 4. Ingest official banlist / card restrictions
+Parses `data/raw/banlist/` (official Bandai HTML `restriction.html` and/or manual local `.json` files) into `card_restrictions` without touching `chunks_vec`:
+```bash
+uv run optcg-ingest banlist
+# Optional: include scheduled future-effective announcements from the official HTML
+uv run optcg-ingest banlist --include-upcoming
+```
+
+### 5. Ingest official FAQs & errata (`authority = 2`)
 ```bash
 uv run optcg-ingest faq data/raw/faq/
 ```
@@ -81,13 +90,13 @@ Supports single files or directories containing `.pdf` (Bandai tabular Excel-exp
 
 Optional flags: `--source auto|official_faq|errata`, `--date YYYY-MM-DD`, `--rules-version 1.24`, `--url https://...`.
 
-### 5. Generate local embeddings (incremental)
+### 6. Generate local embeddings (incremental)
 ```bash
 uv run optcg-ingest embed
 ```
 Useful flags: `--batch-size 8`, `--device auto|cuda|cpu`, `--fp16/--no-fp16`, `--force`. Only new or modified chunks (tracked via `content_hash`) are embedded.
 
-### 6. Import & export curated rulings (collaborative JSON workflow)
+### 7. Import & export curated rulings (collaborative JSON workflow)
 Tracked, anonymized judge rulings live in `data/rulings/` (`TEMPLATE.md`, `threads/`, and `judge_rulings.json`) so collaborators can contribute new rulings via Pull Requests without committing raw Bandai PDFs or un-anonymized chat logs:
 
 ```bash
@@ -136,14 +145,16 @@ Date: 2026-11-18
 | :--- | :--- | :--- |
 | **Query** | `search` | Hybrid search (exact OPTCG tokens + FTS5 BM25 + `sqlite-vec` + RRF + authority/tier tie-breaking) |
 | **Query** | `get_rule` | Look up a Comprehensive Rule by `rule_id` with ancestors and ordered children |
-| **Query** | `get_card` | Look up canonical card(s) by exact `card_id` or fuzzy name |
-| **Query** | `search_cards` | Filter cards by `name`, `color`, `cost`, `trait`, `keyword`, `set_code` |
+| **Query** | `get_trm_section` | Look up a Tournament Rules Manual section by `section_id` (`TRM-7.4.1`) with ancestors and children |
+| **Query** | `get_card` | Look up canonical card(s) by exact `card_id` or fuzzy name, including official banlist legality |
+| **Query** | `search_cards` | Filter cards by `name`, `color`, `cost`, `trait`, `keyword`, `set_code`, and `ban_status` |
+| **Query** | `get_banlist` | Retrieve the full official Bandai banlist (`banned`, `restricted`, `pair_banned`) in one call |
 | **Query** | `get_card_rulings` | List rulings linked to a `card_id` ordered by `authority`, `judge_tier`, `date DESC` |
 | **Curation** | `add_ruling` | Insert anonymized curated ruling (`reviewed=False`), indexed immediately in FTS5 |
 | **Curation** | `mark_ruling` | Update `reviewed`, `superseded_by` (cycle-checked), and/or `judge_tier` |
 | **Curation** | `list_unreviewed_rulings` | Inspect curated rulings awaiting manual approval |
 | **Interop** | `export_rulings` | Export vetted rulings using the exact same versioned JSON schema as the CLI |
-| **Prompt** | `juiz` | OPTCG rules judge workflow citing authority, exact IDs, conflicts, and staleness |
+| **Prompt** | `juiz` | OPTCG rules judge workflow citing authority, exact IDs, banlist legality, conflicts, and staleness |
 | **Prompt** | `curar(arquivo)` | Anonymized judge chat curation workflow targeting `data/raw/judge_chats/<arquivo>` |
 
 ---

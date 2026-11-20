@@ -2,6 +2,7 @@
 
 from optcg_knowledge.search.hybrid import hybrid_search
 from optcg_knowledge.search.queries import (
+    get_banlist,
     get_card,
     get_card_rulings,
     get_rule,
@@ -18,6 +19,7 @@ __all__ = [
     "DetectedTokens",
     "build_fts_queries",
     "detect_query_tokens",
+    "get_banlist",
     "get_card",
     "get_card_rulings",
     "get_rule",

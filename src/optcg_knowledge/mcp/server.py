@@ -32,6 +32,9 @@ from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbed
 from optcg_knowledge.mcp.prompts import build_curar_prompt, build_juiz_prompt
 from optcg_knowledge.search.hybrid import hybrid_search
 from optcg_knowledge.search.queries import (
+    get_banlist as query_get_banlist,
+)
+from optcg_knowledge.search.queries import (
     get_card as query_get_card,
 )
 from optcg_knowledge.search.queries import (
@@ -179,9 +182,10 @@ def create_server(
         name="optcg-knowledge",
         instructions=(
             "One Piece Card Game (OPTCG) knowledge base exposing Comprehensive Rules, "
-            "Tournament Rules Manual (TRM), canonical cards, official FAQs/errata, and judge "
-            "rulings with hybrid search. Authority hierarchy: 1=rules/tournament_rules > "
-            "2=official_faq/errata > 3=judge > 4=community."
+            "Tournament Rules Manual (TRM), canonical cards, official Bandai banlist / card "
+            "restrictions (via get_banlist, get_card, and search_cards), official FAQs/errata, "
+            "and judge rulings with hybrid search. Authority hierarchy: "
+            "1=rules/tournament_rules > 2=official_faq/errata > 3=judge > 4=community."
         ),
     )
 
@@ -249,7 +253,8 @@ def create_server(
         description=(
             "Look up an OPTCG card by canonical card_id (e.g. 'OP05-119', 'ST10-001', 'P-001') "
             "or by name (exact or fuzzy, ignoring punctuation differences like 'Monkey D Luffy'). "
-            "Returns all matching canonical card printings/versions."
+            "Returns all matching canonical card printings/versions along with official banlist "
+            "legality (ban_status, max_copies, paired_card_ids, restriction_note, effective_date)."
         ),
     )
     def get_card(id_or_name: str) -> dict[str, Any]:
@@ -261,7 +266,8 @@ def create_server(
         name="search_cards",
         description=(
             "Filter canonical OPTCG cards by name substring, color, exact cost, trait substring, "
-            "effect/trigger keyword (e.g. '[Blocker]' or 'Rush'), and set_code (e.g. 'OP05'). "
+            "effect/trigger keyword (e.g. '[Blocker]' or 'Rush'), set_code (e.g. 'OP05'), and "
+            "official ban_status ('legal', 'banned', 'restricted', or 'pair_banned'). "
             "Defaults to returning up to 25 matches (max 100)."
         ),
     )
@@ -272,9 +278,10 @@ def create_server(
         trait: str | None = None,
         keyword: str | None = None,
         set_code: str | None = None,
+        ban_status: str | None = None,
         limit: int = 25,
     ) -> dict[str, Any]:
-        """Search canonical cards using structured attribute filters."""
+        """Search canonical cards using structured attribute and banlist filters."""
         with _open_query_db(resolved_settings) as conn:
             return query_search_cards(
                 conn,
@@ -284,8 +291,23 @@ def create_server(
                 trait=trait,
                 keyword=keyword,
                 set_code=set_code,
+                ban_status=ban_status,
                 limit=limit,
             )
+
+    @server.tool(
+        name="get_banlist",
+        description=(
+            "Retrieve the full official Bandai OPTCG banlist / card restrictions in a single call "
+            "(banned, restricted, and pair_banned cards with effective_date, counts, deduplicated "
+            "banned_pairs, and card details when present in the cards table). Optionally filter "
+            "by ban_status ('banned', 'restricted', or 'pair_banned')."
+        ),
+    )
+    def get_banlist(ban_status: str | None = None) -> dict[str, Any]:
+        """List active official banlist and card restriction entries."""
+        with _open_query_db(resolved_settings) as conn:
+            return query_get_banlist(conn, ban_status=ban_status)
 
     @server.tool(
         name="get_card_rulings",

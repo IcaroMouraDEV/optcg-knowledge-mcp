@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 TRM_SECTIONS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS trm_sections (
@@ -16,6 +16,20 @@ CREATE TABLE IF NOT EXISTS trm_sections (
     text TEXT NOT NULL,
     trm_version TEXT,
     effective_date TEXT
+)
+"""
+
+CARD_RESTRICTIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS card_restrictions (
+    card_id TEXT PRIMARY KEY,
+    ban_status TEXT NOT NULL CHECK (
+        ban_status IN ('banned', 'restricted', 'pair_banned')
+    ),
+    max_copies INTEGER NOT NULL CHECK (max_copies IN (0, 1, 4)),
+    paired_card_ids TEXT NOT NULL DEFAULT '[]',
+    restriction_note TEXT,
+    effective_date TEXT,
+    source_url TEXT
 )
 """
 
@@ -67,6 +81,20 @@ CREATE TABLE IF NOT EXISTS cards (
 CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_cards_set_code ON cards(set_code);
 CREATE INDEX IF NOT EXISTS idx_cards_category ON cards(category);
+
+CREATE TABLE IF NOT EXISTS card_restrictions (
+    card_id TEXT PRIMARY KEY,
+    ban_status TEXT NOT NULL CHECK (
+        ban_status IN ('banned', 'restricted', 'pair_banned')
+    ),
+    max_copies INTEGER NOT NULL CHECK (max_copies IN (0, 1, 4)),
+    paired_card_ids TEXT NOT NULL DEFAULT '[]',
+    restriction_note TEXT,
+    effective_date TEXT,
+    source_url TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_card_restrictions_status ON card_restrictions(ban_status);
 
 CREATE TABLE IF NOT EXISTS rulings (
     ruling_id TEXT PRIMARY KEY,
@@ -249,6 +277,19 @@ def migrate_schema(conn: sqlite3.Connection) -> bool:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trm_sections_section ON trm_sections(section)"
+        )
+        migrated = True
+
+    has_card_restrictions = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'card_restrictions'"
+    ).fetchone()
+    if has_card_restrictions is None:
+        conn.execute(CARD_RESTRICTIONS_TABLE_SQL)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_card_restrictions_status
+            ON card_restrictions(ban_status)
+            """
         )
         migrated = True
 

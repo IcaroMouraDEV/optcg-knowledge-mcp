@@ -11,7 +11,14 @@ from typing import Any
 import pytest
 
 from optcg_knowledge.db import connect
-from optcg_knowledge.ingest import HashEmbedder, embed_chunks, ingest_trm, parse_trm_text
+from optcg_knowledge.ingest import (
+    HashEmbedder,
+    embed_chunks,
+    ingest_banlist,
+    ingest_trm,
+    parse_banlist_json,
+    parse_trm_text,
+)
 from optcg_knowledge.mcp import create_server
 
 
@@ -43,6 +50,7 @@ def test_mcp_server_registers_all_tools_and_prompts(
         "get_trm_section",
         "get_card",
         "search_cards",
+        "get_banlist",
         "get_card_rulings",
         "add_ruling",
         "mark_ruling",
@@ -190,10 +198,98 @@ def test_mcp_query_tools_contracts_and_zero_stdout_leak(
     assert "authority = 1" in prompt_text
     assert "get_card_rulings" in prompt_text
     assert "get_trm_section" in prompt_text
+    assert "get_banlist" in prompt_text
     assert "tournament_rules" in prompt_text
+    assert "ban_status" in prompt_text
+    assert "paired_card_ids" in prompt_text
     assert "potentially_outdated" in prompt_text
     assert "optcg-engine" in prompt_text
     assert "OP05-119" in prompt_text
+
+
+def test_mcp_banlist_legality_in_get_card_and_search_cards_zero_stdout_leak(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, embedder = populated_db
+    doc, _ = parse_banlist_json(
+        {
+            "effective_date": "2026-10-12",
+            "restrictions": [
+                {"card_id": "OP01-001", "ban_status": "banned"},
+                {"card_id": "OP04-083", "ban_status": "restricted"},
+                {
+                    "card_id": "OP05-119",
+                    "ban_status": "pair_banned",
+                    "paired_card_ids": ["P-001"],
+                },
+            ],
+        }
+    )
+    ingest_banlist(conn, doc)
+
+    server = create_server(db_path=db_path, embedder=embedder)
+    assert "banlist" in (server.instructions or "").lower()
+    assert "get_banlist" in (server.instructions or "")
+
+    async def _run() -> dict[str, Any]:
+        zoro = _extract_json_payload(await server.call_tool("get_card", {"id_or_name": "OP01-001"}))
+        luffy = _extract_json_payload(
+            await server.call_tool("get_card", {"id_or_name": "OP05-119"})
+        )
+        full_banlist = _extract_json_payload(await server.call_tool("get_banlist", {}))
+        filtered_banlist = _extract_json_payload(
+            await server.call_tool("get_banlist", {"ban_status": "pair_banned"})
+        )
+        banned_list = _extract_json_payload(
+            await server.call_tool("search_cards", {"ban_status": "banned"})
+        )
+        pair_list = _extract_json_payload(
+            await server.call_tool("search_cards", {"ban_status": "pair_banned"})
+        )
+        restricted_list = _extract_json_payload(
+            await server.call_tool("search_cards", {"ban_status": "restricted"})
+        )
+        return {
+            "zoro": zoro,
+            "luffy": luffy,
+            "full_banlist": full_banlist,
+            "filtered_banlist": filtered_banlist,
+            "banned_list": banned_list,
+            "pair_list": pair_list,
+            "restricted_list": restricted_list,
+        }
+
+    res = asyncio.run(_run())
+    assert capsys.readouterr().out == ""
+
+    assert res["zoro"]["banlist_loaded"] is True
+    assert res["zoro"]["banlist_effective_date"] == "2026-10-12"
+    assert res["zoro"]["cards"][0]["ban_status"] == "banned"
+    assert res["zoro"]["cards"][0]["max_copies"] == 0
+    assert res["zoro"]["cards"][0]["effective_date"] == "2026-10-12"
+
+    assert res["luffy"]["cards"][0]["ban_status"] == "pair_banned"
+    assert res["luffy"]["cards"][0]["paired_card_ids"] == ["P-001"]
+
+    assert res["full_banlist"]["banlist_loaded"] is True
+    assert res["full_banlist"]["banlist_effective_date"] == "2026-10-12"
+    assert res["full_banlist"]["counts"] == {
+        "banned": 1,
+        "restricted": 1,
+        "pair_banned": 2,
+        "total": 4,
+    }
+    assert res["full_banlist"]["banned_pairs"] == [["OP05-119", "P-001"]]
+    assert [r["card_id"] for r in res["filtered_banlist"]["restrictions"]] == [
+        "OP05-119",
+        "P-001",
+    ]
+
+    assert [c["card_id"] for c in res["banned_list"]["cards"]] == ["OP01-001"]
+    assert res["banned_list"]["filters"]["ban_status"] == "banned"
+    assert [c["card_id"] for c in res["restricted_list"]["cards"]] == ["OP04-083"]
+    assert [c["card_id"] for c in res["pair_list"]["cards"]] == ["OP05-119", "P-001"]
 
 
 def test_mcp_trm_tool_and_search_filtering_zero_stdout_leak(

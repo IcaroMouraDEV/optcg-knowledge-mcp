@@ -8,6 +8,7 @@ import sqlite3
 from difflib import SequenceMatcher
 from typing import Any
 
+from optcg_knowledge.db.models import MAX_COPIES_BY_BAN_STATUS, normalize_ban_status
 from optcg_knowledge.db.schema import get_meta
 from optcg_knowledge.ingest.trm_parser import TRM_ID_PREFIX, normalize_trm_section_id
 
@@ -102,7 +103,75 @@ def _serialize_rule_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _serialize_card_row(row: sqlite3.Row) -> dict[str, Any]:
+def _has_card_restrictions_table(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'card_restrictions'"
+    ).fetchone()
+    return row is not None
+
+
+def _load_restrictions_by_card_id(
+    conn: sqlite3.Connection,
+    card_ids: list[str] | None = None,
+) -> dict[str, sqlite3.Row]:
+    if not _has_card_restrictions_table(conn):
+        return {}
+    if card_ids is not None:
+        if not card_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in card_ids)
+        rows = conn.execute(
+            f"""
+            SELECT card_id, ban_status, max_copies, paired_card_ids,
+                   restriction_note, effective_date, source_url
+            FROM card_restrictions
+            WHERE UPPER(card_id) IN ({placeholders})
+            """,
+            [cid.upper() for cid in card_ids],
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT card_id, ban_status, max_copies, paired_card_ids,
+                   restriction_note, effective_date, source_url
+            FROM card_restrictions
+            """
+        ).fetchall()
+    return {str(row["card_id"]).upper(): row for row in rows}
+
+
+def _banlist_meta(conn: sqlite3.Connection) -> dict[str, Any]:
+    return {
+        "banlist_loaded": get_meta(conn, "banlist_last_ingested_at") is not None,
+        "banlist_effective_date": get_meta(conn, "banlist_effective_date"),
+    }
+
+
+def _serialize_card_row(
+    row: sqlite3.Row,
+    restriction: sqlite3.Row | None = None,
+) -> dict[str, Any]:
+    if restriction is not None:
+        ban_status = str(restriction["ban_status"])
+        max_copies = int(restriction["max_copies"])
+        paired_card_ids = _parse_json_list(restriction["paired_card_ids"])
+        restriction_note = (
+            str(restriction["restriction_note"])
+            if restriction["restriction_note"] is not None
+            else None
+        )
+        effective_date = (
+            str(restriction["effective_date"])
+            if restriction["effective_date"] is not None
+            else None
+        )
+    else:
+        ban_status = "legal"
+        max_copies = MAX_COPIES_BY_BAN_STATUS["legal"]
+        paired_card_ids = []
+        restriction_note = None
+        effective_date = None
+
     return {
         "card_id": str(row["card_id"]),
         "name": str(row["name"]),
@@ -120,6 +189,11 @@ def _serialize_card_row(row: sqlite3.Row) -> dict[str, Any]:
         "rarity": str(row["rarity"]) if row["rarity"] is not None else None,
         "image_url": str(row["image_url"]) if row["image_url"] is not None else None,
         "variant_count": _extract_variant_count(row["raw_json"]),
+        "ban_status": ban_status,
+        "max_copies": max_copies,
+        "paired_card_ids": paired_card_ids,
+        "restriction_note": restriction_note,
+        "effective_date": effective_date,
     }
 
 
@@ -338,11 +412,13 @@ def _fuzzy_name_score(norm_query: str, query_tokens: list[str], card_name: str) 
 def get_card(conn: sqlite3.Connection, id_or_name: str) -> dict[str, Any]:
     """Look up a card by exact canonical ID or fuzzy name, returning all matching versions."""
     cleaned = id_or_name.strip()
+    meta = _banlist_meta(conn)
     if not cleaned:
         return {
             "query": id_or_name,
             "match_type": "not_found",
             "total": 0,
+            **meta,
             "cards": [],
         }
 
@@ -352,11 +428,14 @@ def get_card(conn: sqlite3.Connection, id_or_name: str) -> dict[str, Any]:
         (cleaned,),
     ).fetchone()
     if exact_id_row is not None:
+        cid = str(exact_id_row["card_id"]).upper()
+        restrictions = _load_restrictions_by_card_id(conn, [cid])
         return {
             "query": cleaned,
             "match_type": "exact_id",
             "total": 1,
-            "cards": [_serialize_card_row(exact_id_row)],
+            **meta,
+            "cards": [_serialize_card_row(exact_id_row, restrictions.get(cid))],
         }
 
     # If the user entered a valid-looking card ID that is not in the DB, avoid noisy fuzzy hits.
@@ -365,6 +444,7 @@ def get_card(conn: sqlite3.Connection, id_or_name: str) -> dict[str, Any]:
             "query": cleaned,
             "match_type": "not_found",
             "total": 0,
+            **meta,
             "cards": [],
         }
 
@@ -379,11 +459,17 @@ def get_card(conn: sqlite3.Connection, id_or_name: str) -> dict[str, Any]:
         or (norm_query and _normalize_text(str(row["name"])) == norm_query)
     ]
     if exact_name_rows:
+        matched_ids = [str(row["card_id"]).upper() for row in exact_name_rows]
+        restrictions = _load_restrictions_by_card_id(conn, matched_ids)
         return {
             "query": cleaned,
             "match_type": "exact_name",
             "total": len(exact_name_rows),
-            "cards": [_serialize_card_row(row) for row in exact_name_rows],
+            **meta,
+            "cards": [
+                _serialize_card_row(row, restrictions.get(str(row["card_id"]).upper()))
+                for row in exact_name_rows
+            ],
         }
 
     # 3. Fuzzy name match
@@ -399,16 +485,23 @@ def get_card(conn: sqlite3.Connection, id_or_name: str) -> dict[str, Any]:
             "query": cleaned,
             "match_type": "not_found",
             "total": 0,
+            **meta,
             "cards": [],
         }
 
     scored_rows.sort(key=lambda item: (-item[0], item[1]))
     top_rows = [row for _, _, row in scored_rows[:MAX_FUZZY_CARD_RESULTS]]
+    matched_ids = [str(row["card_id"]).upper() for row in top_rows]
+    restrictions = _load_restrictions_by_card_id(conn, matched_ids)
     return {
         "query": cleaned,
         "match_type": "fuzzy_name",
         "total": len(top_rows),
-        "cards": [_serialize_card_row(row) for row in top_rows],
+        **meta,
+        "cards": [
+            _serialize_card_row(row, restrictions.get(str(row["card_id"]).upper()))
+            for row in top_rows
+        ],
     }
 
 
@@ -432,12 +525,19 @@ def search_cards(
     trait: str | None = None,
     keyword: str | None = None,
     set_code: str | None = None,
+    ban_status: str | None = None,
     limit: int = 25,
 ) -> dict[str, Any]:
-    """Filter canonical OPTCG cards by structured attributes and text keywords."""
+    """Filter canonical OPTCG cards by structured attributes, text keywords, and ban_status."""
     if limit <= 0:
         raise ValueError("limit must be a positive integer")
     effective_limit = min(limit, MAX_SEARCH_CARDS_LIMIT)
+
+    normalized_ban_status = (
+        normalize_ban_status(ban_status)
+        if ban_status is not None and ban_status.strip()
+        else None
+    )
 
     clauses: list[str] = []
     params: list[Any] = []
@@ -454,6 +554,7 @@ def search_cards(
         f"SELECT * FROM cards {where_sql} ORDER BY card_id ASC",
         params,
     ).fetchall()
+    restrictions = _load_restrictions_by_card_id(conn)
 
     norm_name_filter = _normalize_text(name) if name and name.strip() else None
     raw_name_filter = name.strip().lower() if name and name.strip() else None
@@ -463,6 +564,14 @@ def search_cards(
 
     matched: list[dict[str, Any]] = []
     for row in rows:
+        card_id_upper = str(row["card_id"]).upper()
+        restriction = restrictions.get(card_id_upper)
+        effective_ban_status = (
+            str(restriction["ban_status"]) if restriction is not None else "legal"
+        )
+        if normalized_ban_status is not None and effective_ban_status != normalized_ban_status:
+            continue
+
         if raw_name_filter is not None:
             card_name = str(row["name"])
             if raw_name_filter not in card_name.lower() and (
@@ -485,7 +594,7 @@ def search_cards(
         ):
             continue
 
-        matched.append(_serialize_card_row(row))
+        matched.append(_serialize_card_row(row, restriction))
 
     returned_cards = matched[:effective_limit]
     return {
@@ -496,10 +605,122 @@ def search_cards(
             "trait": trait,
             "keyword": keyword,
             "set_code": set_code,
+            "ban_status": normalized_ban_status,
         },
+        **_banlist_meta(conn),
         "total_matched": len(matched),
         "returned": len(returned_cards),
         "cards": returned_cards,
+    }
+
+
+def get_banlist(
+    conn: sqlite3.Connection,
+    *,
+    ban_status: str | None = None,
+) -> dict[str, Any]:
+    """Return all active official banlist/restriction entries in a single structured response."""
+    normalized_filter: str | None = None
+    if ban_status is not None and ban_status.strip():
+        normalized_filter = normalize_ban_status(ban_status)
+        if normalized_filter == "legal":
+            raise ValueError(
+                "get_banlist only returns restricted cards ('banned', 'restricted', or "
+                "'pair_banned'); use search_cards(ban_status='legal') to list legal cards"
+            )
+
+    meta = _banlist_meta(conn)
+    banlist_source = get_meta(conn, "banlist_source")
+
+    if not _has_card_restrictions_table(conn):
+        return {
+            **meta,
+            "banlist_source": banlist_source,
+            "filter_ban_status": normalized_filter,
+            "counts": {"banned": 0, "restricted": 0, "pair_banned": 0, "total": 0},
+            "banned_pairs": [],
+            "restrictions": [],
+        }
+
+    where_sql = ""
+    params: list[Any] = []
+    if normalized_filter is not None:
+        where_sql = "WHERE cr.ban_status = ?"
+        params.append(normalized_filter)
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            cr.card_id,
+            cr.ban_status,
+            cr.max_copies,
+            cr.paired_card_ids,
+            cr.restriction_note,
+            cr.effective_date,
+            cr.source_url,
+            c.name AS card_name,
+            c.set_code,
+            c.category,
+            c.colors
+        FROM card_restrictions cr
+        LEFT JOIN cards c ON c.card_id = cr.card_id
+        {where_sql}
+        ORDER BY
+            CASE cr.ban_status
+                WHEN 'banned' THEN 1
+                WHEN 'restricted' THEN 2
+                WHEN 'pair_banned' THEN 3
+                ELSE 4
+            END ASC,
+            cr.card_id ASC
+        """,
+        params,
+    ).fetchall()
+
+    restrictions: list[dict[str, Any]] = []
+    counts = {"banned": 0, "restricted": 0, "pair_banned": 0}
+    pair_set: set[tuple[str, str]] = set()
+
+    for row in rows:
+        cid = str(row["card_id"])
+        status = str(row["ban_status"])
+        if status in counts:
+            counts[status] += 1
+        paired = _parse_json_list(row["paired_card_ids"])
+        for partner in paired:
+            a, b = sorted((cid, partner))
+            if a != b:
+                pair_set.add((a, b))
+
+        restrictions.append(
+            {
+                "card_id": cid,
+                "card_found": row["card_name"] is not None,
+                "name": str(row["card_name"]) if row["card_name"] is not None else None,
+                "set_code": str(row["set_code"]) if row["set_code"] is not None else None,
+                "category": str(row["category"]) if row["category"] is not None else None,
+                "colors": _parse_json_list(row["colors"]),
+                "ban_status": status,
+                "max_copies": int(row["max_copies"]),
+                "paired_card_ids": paired,
+                "restriction_note": (
+                    str(row["restriction_note"]) if row["restriction_note"] is not None else None
+                ),
+                "effective_date": (
+                    str(row["effective_date"]) if row["effective_date"] is not None else None
+                ),
+                "source_url": str(row["source_url"]) if row["source_url"] is not None else None,
+            }
+        )
+
+    banned_pairs = [[a, b] for a, b in sorted(pair_set)]
+    return {
+        **meta,
+        "banlist_source": banlist_source,
+        "filter_ban_status": normalized_filter,
+        "counts": {**counts, "total": len(restrictions)},
+        "banned_pairs": banned_pairs,
+        "restrictions": restrictions,
     }
 
 

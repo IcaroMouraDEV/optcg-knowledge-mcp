@@ -9,6 +9,22 @@ AuthorityLevel = Literal[1, 2, 3, 4]
 SourceType = Literal["rules", "official_faq", "errata", "judge", "community"]
 DocType = Literal["rule", "ruling", "card", "tournament_rule"]
 JudgeTier = Literal["tier_0", "tier_2", "tier_1"]
+BanStatus = Literal["legal", "banned", "restricted", "pair_banned"]
+ActiveBanStatus = Literal["banned", "restricted", "pair_banned"]
+
+VALID_BAN_STATUSES: tuple[BanStatus, ...] = (
+    "legal",
+    "banned",
+    "restricted",
+    "pair_banned",
+)
+
+MAX_COPIES_BY_BAN_STATUS: dict[BanStatus, int] = {
+    "legal": 4,
+    "banned": 0,
+    "restricted": 1,
+    "pair_banned": 4,
+}
 
 AUTHORITY_BY_SOURCE: dict[SourceType, AuthorityLevel] = {
     "rules": 1,
@@ -74,6 +90,32 @@ def judge_tier_rank(tier: str | None) -> int:
     return JUDGE_TIER_RANK.get(tier, 4)  # type: ignore[arg-type]
 
 
+_BAN_STATUS_ALIASES: dict[str, BanStatus] = {
+    "legal": "legal",
+    "unrestricted": "legal",
+    "banned": "banned",
+    "ban": "banned",
+    "restricted": "restricted",
+    "limited": "restricted",
+    "pair_banned": "pair_banned",
+    "pair-banned": "pair_banned",
+    "pair banned": "pair_banned",
+    "banned_pair": "pair_banned",
+    "banned-pair": "pair_banned",
+    "banned pair": "pair_banned",
+}
+
+
+def normalize_ban_status(status: str) -> BanStatus:
+    """Normalize a banlist status string to canonical BanStatus."""
+    cleaned = " ".join(status.strip().lower().split())
+    normalized = _BAN_STATUS_ALIASES.get(cleaned)
+    if normalized is None:
+        valid = ", ".join(VALID_BAN_STATUSES)
+        raise ValueError(f"Unknown ban_status {status!r}; expected one of: {valid}")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class RuleRecord:
     """A single Comprehensive Rules entry."""
@@ -119,6 +161,19 @@ class CardRecord:
     rarity: str | None = None
     image_url: str | None = None
     raw_json: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CardRestrictionRecord:
+    """Official banlist / restriction status for a canonical OPTCG card."""
+
+    card_id: str
+    ban_status: ActiveBanStatus
+    max_copies: int
+    paired_card_ids: tuple[str, ...] = ()
+    restriction_note: str | None = None
+    effective_date: str | None = None
+    source_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

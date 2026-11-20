@@ -1,7 +1,7 @@
-"""Downloader for official Bandai OPTCG Comprehensive Rules, FAQ PDFs, and Errata HTML.
+"""Downloader for official Bandai OPTCG rules, TRM, FAQ PDFs, Errata HTML, and Banlist HTML.
 
-Never downloads card images—only official rules PDFs, FAQ PDFs, and the text-only
-errata HTML page into the local gitignored ``data/raw/`` directory.
+Never downloads card images—only official rules/TRM/FAQ PDFs and text-only
+errata/restriction HTML pages into the local gitignored ``data/raw/`` directory.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_OFFICIAL_BASE_URL = "https://en.onepiece-cardgame.com"
 DEFAULT_USER_AGENT = "optcg-knowledge/0.1 (+https://github.com/IcaroMouraDEV/optcg-knowledge-mcp)"
 
-FetchTarget = Literal["all", "rules", "trm", "faq", "errata"]
+FetchTarget = Literal["all", "rules", "trm", "faq", "errata", "banlist"]
 
 _PDF_HREF_RE = re.compile(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.IGNORECASE)
 _MANIFEST_FILENAME = ".official_manifest.json"
@@ -29,7 +29,7 @@ _MANIFEST_FILENAME = ".official_manifest.json"
 
 @dataclass(frozen=True, slots=True)
 class OfficialFetchSummary:
-    """Counters returned after fetching official Bandai rules, TRM, FAQs, and errata."""
+    """Counters returned after fetching official Bandai rules, TRM, FAQs, errata, and banlist."""
 
     downloaded: int
     skipped: int
@@ -38,6 +38,7 @@ class OfficialFetchSummary:
     errata_files: int
     out_dir: Path
     trm_files: int = 0
+    banlist_files: int = 0
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, str]:
@@ -127,14 +128,16 @@ def fetch_official_docs(
     Files are saved into ``<out_dir>/rules/`` and ``<out_dir>/faq/`` with revision
     tracking in ``<out_dir>/.official_manifest.json`` so re-runs skip unchanged files.
     """
-    if only not in ("all", "rules", "trm", "faq", "errata"):
+    if only not in ("all", "rules", "trm", "faq", "errata", "banlist"):
         raise ValueError(
-            f"Unsupported target {only!r}; expected one of: all, rules, trm, faq, errata"
+            f"Unsupported target {only!r}; "
+            "expected one of: all, rules, trm, faq, errata, banlist"
         )
 
     target_root = Path(out_dir)
     rules_dir = target_root / "rules"
     faq_dir = target_root / "faq"
+    banlist_dir = target_root / "banlist"
     manifest_path = target_root / _MANIFEST_FILENAME
     manifest = _load_manifest(manifest_path)
 
@@ -147,6 +150,7 @@ def fetch_official_docs(
     trm_files = 0
     faq_files = 0
     errata_files = 0
+    banlist_files = 0
 
     owns_client = client is None
     active_client = client or httpx.Client(
@@ -278,6 +282,34 @@ def fetch_official_docs(
                 logger.info("Up-to-date (skipped): %s", dest)
             errata_files = 1
 
+        if only in ("all", "banlist"):
+            banlist_page_url = f"{normalized_base}/rules/restriction/"
+            logger.info("Fetching official banlist HTML from %s", banlist_page_url)
+            resp = active_client.get(banlist_page_url)
+            resp.raise_for_status()
+            html_text = resp.text
+            lower_html = html_text.lower()
+            if "banned" not in lower_html and "restricted" not in lower_html:
+                raise ValueError(
+                    f"Unexpected response from {banlist_page_url}: "
+                    "does not look like banlist/restriction HTML"
+                )
+            dest = banlist_dir / "restriction.html"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            existing_html = (
+                dest.read_text(encoding="utf-8", errors="replace") if dest.is_file() else None
+            )
+            resolved_url = str(resp.url) if resp.url else banlist_page_url
+            if force or existing_html != html_text:
+                dest.write_text(html_text, encoding="utf-8")
+                manifest["banlist/restriction.html"] = resolved_url
+                downloaded += 1
+                logger.info("Saved %s", dest)
+            else:
+                skipped += 1
+                logger.info("Up-to-date (skipped): %s", dest)
+            banlist_files = 1
+
         _save_manifest(manifest_path, manifest)
     finally:
         if owns_client:
@@ -291,4 +323,5 @@ def fetch_official_docs(
         errata_files=errata_files,
         out_dir=target_root,
         trm_files=trm_files,
+        banlist_files=banlist_files,
     )
