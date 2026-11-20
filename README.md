@@ -209,3 +209,11 @@ Tests run fast and **100% offline** (no large embedding model downloads):
 uv run ruff check
 uv run pytest -v
 ```
+
+---
+
+## License & Disclaimer
+
+- **License:** This project's source code and community-curated rulings under `data/rulings/` are licensed under the [MIT License](LICENSE).
+- **Third-party dependency note:** PDF parsing uses `PyMuPDF` (`pymupdf`), which is dual-licensed under **AGPL-3.0** / commercial license. Review AGPL-3.0 obligations if you distribute bundled binaries or operate a hosted network service using `PyMuPDF`.
+- **Disclaimer:** `optcg-knowledge` is an unofficial, non-commercial community project and is not affiliated with, endorsed by, or sponsored by Bandai Co., Ltd., Eiichiro Oda, Shueisha, or Toei Animation. One Piece and the One Piece Card Game are trademarks and copyrights of their respective owners. This repository does not host or redistribute official Bandai PDFs or card images.
