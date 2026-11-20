@@ -103,11 +103,16 @@ def _serialize_rule_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _has_card_restrictions_table(conn: sqlite3.Connection) -> bool:
+def _has_table(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'card_restrictions'"
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
     ).fetchone()
     return row is not None
+
+
+def _has_card_restrictions_table(conn: sqlite3.Connection) -> bool:
+    return _has_table(conn, "card_restrictions")
 
 
 def _load_restrictions_by_card_id(
@@ -840,4 +845,210 @@ def get_card_rulings(
         "include_superseded": include_superseded,
         "total": len(rulings),
         "rulings": rulings,
+    }
+
+
+def _count_table(conn: sqlite3.Connection, table_name: str) -> int:
+    if not _has_table(conn, table_name):
+        return 0
+    row = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def get_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return database health, versions, row counts, embedding coverage, and timestamps."""
+    has_meta = _has_table(conn, "meta")
+
+    def _meta(key: str) -> str | None:
+        return get_meta(conn, key) if has_meta else None
+
+    schema_version = _meta("schema_version")
+    rules_version = _meta("rules_version")
+    rules_effective_date = _meta("rules_effective_date")
+    trm_version = _meta("trm_version")
+    trm_effective_date = _meta("trm_effective_date")
+    banlist_effective_date = _meta("banlist_effective_date")
+    banlist_source = _meta("banlist_source")
+    banlist_last_ingested_at = _meta("banlist_last_ingested_at")
+    cards_source = _meta("cards_source")
+    embedding_model = _meta("embedding_model")
+    embedding_dim_raw = _meta("embedding_dim")
+    embedding_dim: int | None = None
+    if embedding_dim_raw is not None:
+        try:
+            embedding_dim = int(embedding_dim_raw)
+        except ValueError:
+            embedding_dim = None
+
+    rules_count = _count_table(conn, "rules")
+    trm_sections_count = _count_table(conn, "trm_sections")
+    cards_count = _count_table(conn, "cards")
+
+    restriction_counts = {"total": 0, "banned": 0, "restricted": 0, "pair_banned": 0}
+    if _has_table(conn, "card_restrictions"):
+        for row in conn.execute(
+            "SELECT ban_status, COUNT(*) AS cnt FROM card_restrictions GROUP BY ban_status"
+        ).fetchall():
+            status_key = str(row["ban_status"])
+            cnt = int(row["cnt"])
+            restriction_counts["total"] += cnt
+            if status_key in restriction_counts:
+                restriction_counts[status_key] = cnt
+
+    rulings_by_source = {
+        "rules": 0,
+        "official_faq": 0,
+        "errata": 0,
+        "judge": 0,
+        "community": 0,
+    }
+    rulings_by_authority = {"1": 0, "2": 0, "3": 0, "4": 0}
+    judge_by_tier = {"tier_0": 0, "tier_2": 0, "tier_1": 0, "unspecified": 0}
+    rulings_total = 0
+    rulings_active = 0
+    rulings_superseded = 0
+    rulings_unreviewed = 0
+
+    if _has_table(conn, "rulings"):
+        agg_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN superseded_by IS NULL THEN 1 ELSE 0 END), 0) AS active,
+                COALESCE(
+                    SUM(CASE WHEN superseded_by IS NOT NULL THEN 1 ELSE 0 END), 0
+                ) AS superseded,
+                COALESCE(SUM(CASE WHEN reviewed = 0 THEN 1 ELSE 0 END), 0) AS unreviewed
+            FROM rulings
+            """
+        ).fetchone()
+        if agg_row is not None:
+            rulings_total = int(agg_row["total"])
+            rulings_active = int(agg_row["active"])
+            rulings_superseded = int(agg_row["superseded"])
+            rulings_unreviewed = int(agg_row["unreviewed"])
+
+        for row in conn.execute(
+            "SELECT source, COUNT(*) AS cnt FROM rulings GROUP BY source"
+        ).fetchall():
+            src_key = str(row["source"])
+            if src_key in rulings_by_source:
+                rulings_by_source[src_key] = int(row["cnt"])
+
+        for row in conn.execute(
+            "SELECT authority, COUNT(*) AS cnt FROM rulings GROUP BY authority"
+        ).fetchall():
+            auth_key = str(row["authority"])
+            if auth_key in rulings_by_authority:
+                rulings_by_authority[auth_key] = int(row["cnt"])
+
+        ruling_columns = {
+            str(r[1]) for r in conn.execute("PRAGMA table_info(rulings)").fetchall()
+        }
+        if "judge_tier" in ruling_columns:
+            for row in conn.execute(
+                """
+                SELECT COALESCE(judge_tier, 'unspecified') AS tier, COUNT(*) AS cnt
+                FROM rulings
+                WHERE source = 'judge'
+                GROUP BY COALESCE(judge_tier, 'unspecified')
+                """
+            ).fetchall():
+                tier_key = str(row["tier"])
+                if tier_key in judge_by_tier:
+                    judge_by_tier[tier_key] = int(row["cnt"])
+        else:
+            judge_by_tier["unspecified"] = rulings_by_source["judge"]
+
+    chunks_by_doc_type = {"rule": 0, "tournament_rule": 0, "card": 0, "ruling": 0}
+    total_chunks = 0
+    embedded_chunks = 0
+    if _has_table(conn, "chunks"):
+        for row in conn.execute(
+            "SELECT doc_type, COUNT(*) AS cnt FROM chunks GROUP BY doc_type"
+        ).fetchall():
+            dtype = str(row["doc_type"])
+            cnt = int(row["cnt"])
+            total_chunks += cnt
+            if dtype in chunks_by_doc_type:
+                chunks_by_doc_type[dtype] = cnt
+
+        if embedding_model is not None:
+            emb_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM chunks
+                WHERE embedded_hash IS NOT NULL
+                  AND embedded_hash = content_hash
+                  AND embedded_model = ?
+                """,
+                (embedding_model,),
+            ).fetchone()
+        else:
+            emb_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM chunks
+                WHERE embedded_hash IS NOT NULL
+                  AND embedded_hash = content_hash
+                  AND embedded_model IS NOT NULL
+                """
+            ).fetchone()
+        embedded_chunks = int(emb_row[0]) if emb_row is not None else 0
+
+    pending_chunks = max(total_chunks - embedded_chunks, 0)
+    vec_rows = _count_table(conn, "chunks_vec")
+    coverage_pct = round((embedded_chunks / total_chunks) * 100.0, 1) if total_chunks > 0 else 0.0
+    embeddings_ready = total_chunks > 0 and pending_chunks == 0 and vec_rows >= embedded_chunks
+
+    return {
+        "schema_version": schema_version,
+        "rules_version": rules_version,
+        "rules_effective_date": rules_effective_date,
+        "trm_version": trm_version,
+        "trm_effective_date": trm_effective_date,
+        "banlist_loaded": banlist_last_ingested_at is not None,
+        "banlist_effective_date": banlist_effective_date,
+        "banlist_source": banlist_source,
+        "cards_source": cards_source,
+        "embedding_model": embedding_model,
+        "embedding_dim": embedding_dim,
+        "counts": {
+            "rules": rules_count,
+            "trm_sections": trm_sections_count,
+            "cards": cards_count,
+            "card_restrictions": restriction_counts,
+            "rulings": {
+                "total": rulings_total,
+                "active": rulings_active,
+                "superseded": rulings_superseded,
+                "unreviewed": rulings_unreviewed,
+                "by_source": rulings_by_source,
+                "by_authority": rulings_by_authority,
+                "judge_by_tier": judge_by_tier,
+            },
+            "chunks": {
+                "total": total_chunks,
+                "by_doc_type": chunks_by_doc_type,
+            },
+        },
+        "embeddings": {
+            "model": embedding_model,
+            "dim": embedding_dim,
+            "total_chunks": total_chunks,
+            "embedded_chunks": embedded_chunks,
+            "pending_chunks": pending_chunks,
+            "vec_rows": vec_rows,
+            "coverage_pct": coverage_pct,
+            "ready": embeddings_ready,
+        },
+        "timestamps": {
+            "last_ingested_at": _meta("last_ingested_at"),
+            "rules_last_ingested_at": _meta("rules_last_ingested_at"),
+            "trm_last_ingested_at": _meta("trm_last_ingested_at"),
+            "cards_last_ingested_at": _meta("cards_last_ingested_at"),
+            "banlist_last_ingested_at": banlist_last_ingested_at,
+            "last_faq_ingested_at": _meta("last_faq_ingested_at"),
+            "last_embed_at": _meta("last_embed_at"),
+        },
     }

@@ -45,7 +45,34 @@ Default local embedding model is `BAAI/bge-m3` (`1024` dims, FP16 on CUDA with `
 
 ---
 
-## Ingestion Pipeline (`optcg-ingest`)
+## Quick Start (One-Command Sync)
+
+After installing dependencies with `uv sync` (or `uv sync --extra embeddings` for local hybrid vector search), populate the entire local SQLite knowledge base in a single idempotent command:
+
+```bash
+uv run optcg-ingest sync
+```
+
+`optcg-ingest sync` orchestrates every stage in order:
+1. `fetch-official` — downloads official Bandai Comprehensive Rules PDF, TRM PDF, FAQ PDFs, errata HTML, and banlist HTML (skips unchanged files; pass `--skip-fetch` to reuse local `data/raw/` files)
+2. `rules` & `trm` — ingests Comprehensive Rules and Tournament Rules Manual (`authority = 1`)
+3. `cards` — imports canonical cards from `punk-records` (pass `--skip-cards` or `--cards-source local`)
+4. `banlist` — ingests official Bandai banlist / card restrictions
+5. `faq` — ingests official Bandai FAQs & errata (`authority = 2`)
+6. `import-rulings` — imports tracked curated judge rulings from `data/rulings/`
+7. `embed` — incrementally generates local embeddings (automatically skipped with a friendly note if the optional `[embeddings]` extra is not installed, or pass `--no-embed` for lexical-only FTS5 BM25)
+
+Inspect database health, versions, row counts, embedding coverage, and timestamps at any time:
+
+```bash
+uv run optcg-ingest status
+# Or emit machine-readable JSON matching the MCP get_status() contract:
+uv run optcg-ingest status --json
+```
+
+---
+
+## Individual Ingestion Commands (`optcg-ingest`)
 
 All ingestion commands are **idempotent** and safe to re-run without duplicating rows or re-embedding unchanged chunks. Raw Bandai PDFs/HTML and chat dumps live under `data/raw/` (gitignored).
 
@@ -153,6 +180,7 @@ Date: 2026-11-18
 | **Curation** | `add_ruling` | Insert anonymized curated ruling (`reviewed=False`), indexed immediately in FTS5 |
 | **Curation** | `mark_ruling` | Update `reviewed`, `superseded_by` (cycle-checked), and/or `judge_tier` |
 | **Curation** | `list_unreviewed_rulings` | Inspect curated rulings awaiting manual approval |
+| **Diagnostics** | `get_status` | Report DB schema/rules/TRM/banlist versions, table/authority/tier counts, embedding coverage, and timestamps |
 | **Interop** | `export_rulings` | Export vetted rulings using the exact same versioned JSON schema as the CLI |
 | **Prompt** | `juiz` | OPTCG rules judge workflow citing authority, exact IDs, banlist legality, conflicts, and staleness |
 | **Prompt** | `curar(arquivo)` | Anonymized judge chat curation workflow targeting `data/raw/judge_chats/<arquivo>` |

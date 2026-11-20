@@ -55,6 +55,7 @@ def test_mcp_server_registers_all_tools_and_prompts(
         "add_ruling",
         "mark_ruling",
         "list_unreviewed_rulings",
+        "get_status",
         "export_rulings",
     }
     assert set(prompt_names) == {"juiz", "curar"}
@@ -386,3 +387,62 @@ def test_mcp_server_degrades_gracefully_without_vectors_or_embedder(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks'"
         ).fetchone()
         assert row is not None
+
+
+def test_mcp_get_status_contract_and_zero_stdout_leak(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, embedder = populated_db
+    doc, _ = parse_banlist_json(
+        {
+            "effective_date": "2026-10-12",
+            "restrictions": [
+                {"card_id": "OP01-001", "ban_status": "banned"},
+            ],
+        }
+    )
+    ingest_banlist(conn, doc)
+
+    server = create_server(db_path=db_path, embedder=embedder)
+    assert "get_status" in (server.instructions or "")
+
+    async def _run() -> dict[str, Any]:
+        return _extract_json_payload(await server.call_tool("get_status", {}))
+
+    status = asyncio.run(_run())
+    assert capsys.readouterr().out == ""
+
+    assert status["schema_version"] == "4"
+    assert status["rules_version"] == "1.24"
+    assert status["banlist_loaded"] is True
+    assert status["banlist_effective_date"] == "2026-10-12"
+    assert status["embedding_model"] == embedder.model_name
+    assert status["embedding_dim"] == embedder.dimension
+
+    assert status["counts"]["rules"] > 0
+    assert status["counts"]["cards"] > 0
+    assert status["counts"]["card_restrictions"] == {
+        "total": 1,
+        "banned": 1,
+        "restricted": 0,
+        "pair_banned": 0,
+    }
+    assert status["counts"]["rulings"]["total"] == 5
+    assert status["counts"]["rulings"]["superseded"] == 1
+    assert status["counts"]["rulings"]["active"] == 4
+    assert status["counts"]["rulings"]["unreviewed"] == 0
+    assert status["counts"]["rulings"]["by_source"]["official_faq"] == 2
+    assert status["counts"]["rulings"]["by_source"]["judge"] == 2
+    assert status["counts"]["rulings"]["by_source"]["community"] == 1
+    assert status["counts"]["rulings"]["judge_by_tier"]["unspecified"] == 2
+
+    assert status["embeddings"]["total_chunks"] == status["counts"]["chunks"]["total"]
+    assert status["embeddings"]["embedded_chunks"] == status["embeddings"]["total_chunks"]
+    assert status["embeddings"]["pending_chunks"] == 0
+    assert status["embeddings"]["coverage_pct"] == 100.0
+    assert status["embeddings"]["ready"] is True
+
+    assert status["timestamps"]["last_ingested_at"] is not None
+    assert status["timestamps"]["last_embed_at"] is not None
+    assert status["timestamps"]["banlist_last_ingested_at"] is not None

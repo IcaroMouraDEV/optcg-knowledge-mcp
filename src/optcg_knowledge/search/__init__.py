@@ -6,6 +6,7 @@ from optcg_knowledge.search.queries import (
     get_card,
     get_card_rulings,
     get_rule,
+    get_status,
     get_trm_section,
     search_cards,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "get_card",
     "get_card_rulings",
     "get_rule",
+    "get_status",
     "get_trm_section",
     "hybrid_search",
     "search_cards",
