@@ -10,6 +10,7 @@ readme = "PROMPT.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "httpx>=0.28.0",
+    "mcp>=2.0.0",
     "pymupdf>=1.25.0",
     "sqlite-vec>=0.1.6",
 ]
@@ -21,6 +22,7 @@ embeddings = [
 
 [project.scripts]
 optcg-ingest = "optcg_knowledge.cli:main"
+optcg-mcp = "optcg_knowledge.mcp.server:main"
 
 [dependency-groups]
 dev = [

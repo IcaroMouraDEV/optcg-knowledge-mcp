@@ -8,9 +8,11 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from optcg_knowledge.config import get_settings
+from optcg_knowledge.config import Settings, get_settings
 from optcg_knowledge.db import open_db
 from optcg_knowledge.ingest.cards_importer import ingest_cards
+from optcg_knowledge.ingest.embed_pipeline import embed_chunks
+from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbedder
 from optcg_knowledge.ingest.rules_parser import ingest_rules, parse_rules_pdf
 from optcg_knowledge.ingest.sources import CardSource, LocalCardSource, PunkRecordsSource
 
@@ -24,10 +26,20 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
+def _create_embedder(settings: Settings) -> Embedder:
+    return SentenceTransformerEmbedder(
+        model_name=settings.embedding_model,
+        device=settings.embedding_device,
+        use_fp16=settings.embedding_fp16,
+        batch_size=settings.embedding_batch_size,
+        dimension=settings.embedding_dim,
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="optcg-ingest",
-        description="Ingest One Piece Card Game rules and cards into the SQLite knowledge base.",
+        description="Ingest One Piece Card Game rules, cards, and embeddings into SQLite.",
     )
     parser.add_argument(
         "--db",
@@ -101,6 +113,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated pack IDs to fetch for --source punk-records (e.g., OP01,OP05).",
     )
 
+    embed_parser = subparsers.add_parser(
+        "embed",
+        help="Incrementally generate local embeddings for new or modified chunks.",
+    )
+    embed_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Chunks per embedding batch (default: OPTCG_EMBEDDING_BATCH_SIZE or 8).",
+    )
+    embed_parser.add_argument(
+        "--device",
+        default=None,
+        help="Device to run local embeddings on: auto, cuda, cpu (default: auto).",
+    )
+    embed_parser.add_argument(
+        "--fp16",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use FP16 weights on CUDA to fit 4GB VRAM GPUs (default: enabled).",
+    )
+    embed_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-embed all chunks even if their content_hash is already indexed.",
+    )
+
     return parser
 
 
@@ -113,6 +152,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = get_settings(
         db_path=args.db,
         embedding_model=args.embedding_model,
+        embedding_device=getattr(args, "device", None),
+        embedding_batch_size=getattr(args, "batch_size", None),
+        embedding_fp16=getattr(args, "fp16", None),
     )
 
     if args.command == "init-db":
@@ -177,6 +219,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"Ingested {summary.cards_upserted} canonical cards from {summary.source_name} "
             f"(raw={summary.raw_records_seen}, variants_merged={summary.variants_merged}, "
             f"chunks={summary.chunks_upserted})"
+        )
+        return 0
+
+    if args.command == "embed":
+        embedder = _create_embedder(settings)
+        with open_db(
+            settings.db_path,
+            init=True,
+            embedding_model=embedder.model_name,
+            embedding_dim=embedder.dimension,
+        ) as conn:
+            summary = embed_chunks(
+                conn,
+                embedder,
+                batch_size=settings.embedding_batch_size,
+                force=args.force,
+            )
+        print(
+            f"Embedded {summary.embedded_chunks}/{summary.total_chunks} chunks "
+            f"(skipped={summary.skipped_chunks}, orphans_removed={summary.orphans_removed}, "
+            f"rebuilt={summary.rebuilt_vec_table}, model={summary.model_name}, "
+            f"dim={summary.dimension})"
         )
         return 0
 
