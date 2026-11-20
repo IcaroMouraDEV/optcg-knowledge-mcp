@@ -61,6 +61,25 @@ class CardRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class RulingRecord:
+    """Structured OPTCG ruling (official FAQ, errata, judge, or community)."""
+
+    ruling_id: str
+    question: str
+    answer: str
+    source: SourceType
+    authority: AuthorityLevel
+    date: str | None = None
+    rules_version: str | None = None
+    url: str | None = None
+    superseded_by: str | None = None
+    reviewed: bool = False
+    raw_ref: str | None = None
+    card_ids: tuple[str, ...] = ()
+    rule_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ChunkRecord:
     """Searchable unit indexed by FTS5 (BM25) and sqlite-vec (embeddings)."""
 

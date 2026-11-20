@@ -7,9 +7,17 @@ import json
 import sqlite3
 from collections.abc import Iterable, Mapping
 
-from optcg_knowledge.db.models import CardRecord, ChunkRecord, RuleRecord
+from optcg_knowledge.db.models import CardRecord, ChunkRecord, RuleRecord, RulingRecord
 
 MAX_ANCESTOR_CHARS = 240
+
+_RULING_SOURCE_LABELS: dict[str, str] = {
+    "rules": "RULES",
+    "official_faq": "OFFICIAL FAQ",
+    "errata": "ERRATA",
+    "judge": "JUDGE RULING",
+    "community": "COMMUNITY RULING",
+}
 
 
 def compute_content_hash(text: str) -> str:
@@ -113,6 +121,42 @@ def build_card_chunk(card: CardRecord) -> ChunkRecord:
             "colors": list(card.colors),
             "traits": list(card.traits),
             "rarity": card.rarity,
+        },
+        content_hash=compute_content_hash(text),
+    )
+
+
+def build_ruling_chunk(ruling: RulingRecord) -> ChunkRecord:
+    """Build one chunk per ruling combining question, answer, and linked IDs."""
+    source_label = _RULING_SOURCE_LABELS.get(ruling.source, ruling.source.upper())
+    context_parts: list[str] = []
+    if ruling.card_ids:
+        context_parts.append(f"Cards: {', '.join(ruling.card_ids)}")
+    if ruling.rule_ids:
+        context_parts.append(f"Rules: {', '.join(ruling.rule_ids)}")
+
+    header = (
+        f"[{source_label}] {' | '.join(context_parts)}"
+        if context_parts
+        else f"[{source_label}]"
+    )
+    text = f"{header}\nQ: {ruling.question}\nA: {ruling.answer}"
+
+    return ChunkRecord(
+        chunk_id=f"ruling:{ruling.ruling_id}",
+        doc_type="ruling",
+        doc_id=ruling.ruling_id,
+        text=text,
+        authority=ruling.authority,
+        metadata={
+            "ruling_id": ruling.ruling_id,
+            "source": ruling.source,
+            "date": ruling.date,
+            "rules_version": ruling.rules_version,
+            "url": ruling.url,
+            "raw_ref": ruling.raw_ref,
+            "card_ids": list(ruling.card_ids),
+            "rule_ids": list(ruling.rule_ids),
         },
         content_hash=compute_content_hash(text),
     )
