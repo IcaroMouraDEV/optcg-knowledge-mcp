@@ -29,6 +29,8 @@ from optcg_knowledge.ingest.official_downloader import (
 from optcg_knowledge.ingest.rules_parser import ingest_rules, parse_rules_pdf
 from optcg_knowledge.ingest.sources import CardSource, LocalCardSource, PunkRecordsSource
 from optcg_knowledge.ingest.trm_parser import ingest_trm, parse_trm_pdf
+from optcg_knowledge.search.queries import get_status
+from optcg_knowledge.sync import run_sync
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -48,6 +50,103 @@ def _create_embedder(settings: Settings) -> Embedder:
         batch_size=settings.embedding_batch_size,
         dimension=settings.embedding_dim,
     )
+
+
+def _format_status_report(db_path: Path, payload: dict[str, object]) -> str:
+    counts = payload["counts"]
+    assert isinstance(counts, dict)
+    restrictions = counts["card_restrictions"]
+    assert isinstance(restrictions, dict)
+    rulings = counts["rulings"]
+    assert isinstance(rulings, dict)
+    by_source = rulings["by_source"]
+    assert isinstance(by_source, dict)
+    by_authority = rulings["by_authority"]
+    assert isinstance(by_authority, dict)
+    judge_by_tier = rulings["judge_by_tier"]
+    assert isinstance(judge_by_tier, dict)
+    chunks = counts["chunks"]
+    assert isinstance(chunks, dict)
+    by_doc_type = chunks["by_doc_type"]
+    assert isinstance(by_doc_type, dict)
+    embeddings = payload["embeddings"]
+    assert isinstance(embeddings, dict)
+    timestamps = payload["timestamps"]
+    assert isinstance(timestamps, dict)
+
+    banlist_label = (
+        f"loaded (effective={payload['banlist_effective_date'] or 'unknown'}, "
+        f"source={payload['banlist_source'] or 'unknown'})"
+        if payload["banlist_loaded"]
+        else "not loaded"
+    )
+    lines = [
+        f"OPTCG Knowledge Base Status ({db_path})",
+        "Versions & Config:",
+        f"  schema_version:    {payload['schema_version'] or 'unknown'}",
+        (
+            f"  rules_version:     {payload['rules_version'] or 'none'} "
+            f"(effective={payload['rules_effective_date'] or 'unknown'})"
+        ),
+        (
+            f"  trm_version:       {payload['trm_version'] or 'none'} "
+            f"(effective={payload['trm_effective_date'] or 'unknown'})"
+        ),
+        f"  banlist:           {banlist_label}",
+        f"  cards_source:      {payload['cards_source'] or 'none'}",
+        (
+            f"  embedding_model:   {payload['embedding_model'] or 'none'} "
+            f"(dim={payload['embedding_dim'] if payload['embedding_dim'] is not None else 'none'})"
+        ),
+        "Counts:",
+        f"  rules:             {counts['rules']}",
+        f"  trm_sections:      {counts['trm_sections']}",
+        f"  cards:             {counts['cards']}",
+        (
+            f"  card_restrictions: {restrictions['total']} "
+            f"(banned={restrictions['banned']}, restricted={restrictions['restricted']}, "
+            f"pair_banned={restrictions['pair_banned']})"
+        ),
+        (
+            f"  rulings:           {rulings['total']} "
+            f"(active={rulings['active']}, superseded={rulings['superseded']}, "
+            f"unreviewed={rulings['unreviewed']})"
+        ),
+        (
+            f"    by_source:       official_faq={by_source['official_faq']}, "
+            f"errata={by_source['errata']}, judge={by_source['judge']}, "
+            f"community={by_source['community']}, rules={by_source['rules']}"
+        ),
+        (
+            f"    by_authority:    auth1={by_authority['1']}, auth2={by_authority['2']}, "
+            f"auth3={by_authority['3']}, auth4={by_authority['4']}"
+        ),
+        (
+            f"    judge_by_tier:   tier_0={judge_by_tier['tier_0']}, "
+            f"tier_2={judge_by_tier['tier_2']}, tier_1={judge_by_tier['tier_1']}, "
+            f"unspecified={judge_by_tier['unspecified']}"
+        ),
+        (
+            f"  chunks:            {chunks['total']} "
+            f"(rule={by_doc_type['rule']}, tournament_rule={by_doc_type['tournament_rule']}, "
+            f"card={by_doc_type['card']}, ruling={by_doc_type['ruling']})"
+        ),
+        "Embeddings:",
+        (
+            f"  coverage:          {embeddings['embedded_chunks']}/{embeddings['total_chunks']} "
+            f"({embeddings['coverage_pct']}%, pending={embeddings['pending_chunks']}, "
+            f"vec_rows={embeddings['vec_rows']}, ready={embeddings['ready']})"
+        ),
+        "Timestamps:",
+        f"  last_ingested_at:      {timestamps['last_ingested_at'] or 'never'}",
+        f"  rules_last_ingested:   {timestamps['rules_last_ingested_at'] or 'never'}",
+        f"  trm_last_ingested:     {timestamps['trm_last_ingested_at'] or 'never'}",
+        f"  cards_last_ingested:   {timestamps['cards_last_ingested_at'] or 'never'}",
+        f"  banlist_last_ingested: {timestamps['banlist_last_ingested_at'] or 'never'}",
+        f"  last_faq_ingested_at:  {timestamps['last_faq_ingested_at'] or 'never'}",
+        f"  last_embed_at:         {timestamps['last_embed_at'] or 'never'}",
+    ]
+    return "\n".join(lines)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -77,6 +176,136 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "init-db",
         help="Initialize or verify the SQLite schema (FTS5 + sqlite-vec).",
+    )
+
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help=(
+            "One-command end-to-end sync: fetch-official -> rules -> trm -> cards -> "
+            "banlist -> faq -> import-rulings -> embed."
+        ),
+    )
+    sync_parser.add_argument(
+        "--raw-dir",
+        type=Path,
+        default=None,
+        help="Raw data directory (defaults to OPTCG_RAW_DATA_DIR or data/raw).",
+    )
+    sync_parser.add_argument(
+        "--skip-fetch",
+        action="store_true",
+        help="Skip downloading official Bandai documents (use existing local files in data/raw).",
+    )
+    sync_parser.add_argument(
+        "--force-fetch",
+        action="store_true",
+        help="Re-download official Bandai files even if unchanged in the manifest.",
+    )
+    sync_parser.add_argument(
+        "--base-url",
+        default=DEFAULT_OFFICIAL_BASE_URL,
+        help=f"Official Bandai site base URL (default: {DEFAULT_OFFICIAL_BASE_URL}).",
+    )
+    sync_parser.add_argument(
+        "--skip-rules",
+        action="store_true",
+        help="Skip Comprehensive Rules ingestion.",
+    )
+    sync_parser.add_argument(
+        "--skip-trm",
+        action="store_true",
+        help="Skip Tournament Rules Manual (TRM) ingestion.",
+    )
+    sync_parser.add_argument(
+        "--skip-cards",
+        action="store_true",
+        help="Skip canonical card ingestion.",
+    )
+    sync_parser.add_argument(
+        "--cards-source",
+        choices=("punk-records", "local"),
+        default="punk-records",
+        help="Card data source adapter for sync (default: punk-records).",
+    )
+    sync_parser.add_argument(
+        "--cards-path",
+        type=Path,
+        default=None,
+        help="Local JSON file or directory when --cards-source local is used.",
+    )
+    sync_parser.add_argument(
+        "--cards-base-url",
+        default=None,
+        help="Override base URL when --cards-source punk-records is used.",
+    )
+    sync_parser.add_argument(
+        "--packs",
+        default=None,
+        help="Comma-separated pack IDs for --cards-source punk-records (e.g., OP01,OP05).",
+    )
+    sync_parser.add_argument(
+        "--skip-banlist",
+        action="store_true",
+        help="Skip official banlist / card restrictions ingestion.",
+    )
+    sync_parser.add_argument(
+        "--include-upcoming",
+        action="store_true",
+        help="Also include scheduled future-effective announcements from official banlist HTML.",
+    )
+    sync_parser.add_argument(
+        "--skip-faq",
+        action="store_true",
+        help="Skip official FAQ / errata ingestion.",
+    )
+    sync_parser.add_argument(
+        "--skip-rulings",
+        action="store_true",
+        help="Skip importing curated rulings JSON from data/rulings.",
+    )
+    sync_parser.add_argument(
+        "--rulings-dir",
+        type=Path,
+        default=None,
+        help="Curated rulings JSON file or directory (defaults to <db_dir>/rulings).",
+    )
+    sync_parser.add_argument(
+        "--no-embed",
+        action="store_true",
+        help="Skip local vector embedding generation (FTS5 lexical search still works).",
+    )
+    sync_parser.add_argument(
+        "--force-embed",
+        action="store_true",
+        help="Re-embed all chunks even if their content_hash is already indexed.",
+    )
+    sync_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Chunks per embedding batch (default: OPTCG_EMBEDDING_BATCH_SIZE or 8).",
+    )
+    sync_parser.add_argument(
+        "--device",
+        default=None,
+        help="Device to run local embeddings on: auto, cuda, cpu (default: auto).",
+    )
+    sync_parser.add_argument(
+        "--fp16",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use FP16 weights on CUDA to fit 4GB VRAM GPUs (default: enabled).",
+    )
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show database health, versions, row counts, embedding coverage, and timestamps.",
+    )
+    status_parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Print machine-readable JSON matching the MCP get_status() contract.",
     )
 
     fetch_parser = subparsers.add_parser(
@@ -355,6 +584,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     settings = get_settings(
         db_path=args.db,
+        raw_data_dir=getattr(args, "raw_dir", None),
         embedding_model=args.embedding_model,
         embedding_device=getattr(args, "device", None),
         embedding_batch_size=getattr(args, "batch_size", None),
@@ -373,6 +603,71 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"Initialized database at {settings.db_path} "
             f"(model={settings.embedding_model}, dim={settings.embedding_dim})"
         )
+        return 0
+
+    if args.command == "sync":
+        pack_ids = (
+            [p.strip() for p in args.packs.split(",") if p.strip()]
+            if args.packs
+            else None
+        )
+        sync_summary = run_sync(
+            settings,
+            skip_fetch=args.skip_fetch,
+            force_fetch=args.force_fetch,
+            official_base_url=args.base_url,
+            skip_rules=args.skip_rules,
+            skip_trm=args.skip_trm,
+            skip_cards=args.skip_cards,
+            cards_source_mode=args.cards_source,
+            cards_path=args.cards_path,
+            cards_base_url=args.cards_base_url,
+            cards_packs=pack_ids,
+            skip_banlist=args.skip_banlist,
+            include_upcoming_banlist=args.include_upcoming,
+            skip_faq=args.skip_faq,
+            skip_rulings=args.skip_rulings,
+            rulings_path=args.rulings_dir,
+            no_embed=args.no_embed,
+            force_embed=args.force_embed,
+            embedder_factory=_create_embedder,
+        )
+        print(f"Sync completed for {sync_summary.db_path}:")
+        for step in sync_summary.steps:
+            tag = "OK" if step.status == "completed" else "SKIP"
+            print(f"  [{tag}] {step.name}: {step.detail}")
+        emb = sync_summary.status_snapshot["embeddings"]
+        print(
+            f"Embeddings coverage: {emb['embedded_chunks']}/{emb['total_chunks']} "
+            f"({emb['coverage_pct']}%, pending={emb['pending_chunks']})"
+        )
+        return 0
+
+    if args.command == "status":
+        is_memory = str(settings.db_path) == ":memory:"
+        if not is_memory and not settings.db_path.exists():
+            if args.as_json:
+                print(
+                    json.dumps(
+                        {"exists": False, "db_path": str(settings.db_path)},
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                print(
+                    f"Database not found at {settings.db_path}. "
+                    "Run `optcg-ingest sync` to initialize and populate it."
+                )
+            return 0
+
+        with open_db(settings.db_path, init=False) as conn:
+            payload = get_status(conn)
+
+        if args.as_json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(_format_status_report(settings.db_path, payload))
         return 0
 
     if args.command == "fetch-official":

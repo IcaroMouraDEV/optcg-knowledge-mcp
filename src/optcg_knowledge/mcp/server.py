@@ -44,6 +44,9 @@ from optcg_knowledge.search.queries import (
     get_rule as query_get_rule,
 )
 from optcg_knowledge.search.queries import (
+    get_status as query_get_status,
+)
+from optcg_knowledge.search.queries import (
     get_trm_section as query_get_trm_section,
 )
 from optcg_knowledge.search.queries import (
@@ -184,7 +187,8 @@ def create_server(
             "One Piece Card Game (OPTCG) knowledge base exposing Comprehensive Rules, "
             "Tournament Rules Manual (TRM), canonical cards, official Bandai banlist / card "
             "restrictions (via get_banlist, get_card, and search_cards), official FAQs/errata, "
-            "and judge rulings with hybrid search. Authority hierarchy: "
+            "judge rulings with hybrid search, and database health/freshness diagnostics "
+            "(via get_status). Authority hierarchy: "
             "1=rules/tournament_rules > 2=official_faq/errata > 3=judge > 4=community."
         ),
     )
@@ -400,6 +404,21 @@ def create_server(
         """Return rulings awaiting curation review."""
         with _open_query_db(resolved_settings) as conn:
             return curate_list_unreviewed_rulings(conn, limit=limit)
+
+    @server.tool(
+        name="get_status",
+        description=(
+            "Return OPTCG knowledge base health and freshness diagnostics: schema_version, "
+            "rules_version, trm_version, banlist_loaded/banlist_effective_date, embedding_model "
+            "and embedding_dim, row counts by table/source/authority/judge_tier (including "
+            "unreviewed rulings), vector embedding coverage (embedded/total/pending chunks), "
+            "and ingestion/embed timestamps."
+        ),
+    )
+    def get_status() -> dict[str, Any]:
+        """Inspect database versions, counts, embedding coverage, and ingestion timestamps."""
+        with _open_query_db(resolved_settings) as conn:
+            return query_get_status(conn)
 
     @server.tool(
         name="export_rulings",
