@@ -1,0 +1,3 @@
+# Require owner review for curated rulings, workflows, and repo governance files
+data/rulings/ @IcaroMouraDEV
+.github/ @IcaroMouraDEV

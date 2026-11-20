@@ -19,7 +19,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 DEFAULT_OFFICIAL_BASE_URL = "https://en.onepiece-cardgame.com"
-DEFAULT_USER_AGENT = "optcg-knowledge/0.1 (+https://github.com/IcaroMouraDEV/optcg-knowledge)"
+DEFAULT_USER_AGENT = "optcg-knowledge/0.1 (+https://github.com/IcaroMouraDEV/optcg-knowledge-mcp)"
 
 FetchTarget = Literal["all", "rules", "faq", "errata"]
 
