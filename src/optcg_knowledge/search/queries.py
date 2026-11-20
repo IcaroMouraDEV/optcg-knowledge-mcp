@@ -389,6 +389,7 @@ def get_card_rulings(
             r.answer,
             r.source,
             r.authority,
+            r.judge_tier,
             r.date,
             r.rules_version,
             r.url,
@@ -398,7 +399,16 @@ def get_card_rulings(
         JOIN ruling_cards rc ON rc.ruling_id = r.ruling_id
         WHERE UPPER(rc.card_id) = ?
           {superseded_clause}
-        ORDER BY r.authority ASC, COALESCE(r.date, '') DESC, r.ruling_id ASC
+        ORDER BY
+            r.authority ASC,
+            CASE r.judge_tier
+                WHEN 'tier_0' THEN 1
+                WHEN 'tier_2' THEN 2
+                WHEN 'tier_1' THEN 3
+                ELSE 4
+            END ASC,
+            COALESCE(r.date, '') DESC,
+            r.ruling_id ASC
         """,
         (normalized_id,),
     ).fetchall()
@@ -447,6 +457,9 @@ def get_card_rulings(
                 "answer": str(row["answer"]),
                 "source": str(row["source"]),
                 "authority": int(row["authority"]),
+                "judge_tier": (
+                    str(row["judge_tier"]) if row["judge_tier"] is not None else None
+                ),
                 "date": str(row["date"]) if row["date"] is not None else None,
                 "rules_version": ruling_version,
                 "url": str(row["url"]) if row["url"] is not None else None,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 BASE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS rules (
@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS rulings (
     url TEXT,
     superseded_by TEXT REFERENCES rulings(ruling_id) ON DELETE SET NULL,
     reviewed INTEGER NOT NULL DEFAULT 0 CHECK (reviewed IN (0, 1)),
-    raw_ref TEXT
+    raw_ref TEXT,
+    judge_tier TEXT CHECK (judge_tier IS NULL OR judge_tier IN ('tier_0', 'tier_2', 'tier_1'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_rulings_authority ON rulings(authority);
@@ -188,6 +189,36 @@ def ensure_vec_table(
     return needs_rebuild
 
 
+def migrate_schema(conn: sqlite3.Connection) -> bool:
+    """Apply idempotent, non-destructive schema migrations to an existing SQLite DB.
+
+    Returns True when any migration statement was applied.
+    """
+    has_rulings = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rulings'"
+    ).fetchone()
+    if has_rulings is None:
+        return False
+
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(rulings)").fetchall()
+    }
+    migrated = False
+    if "judge_tier" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE rulings
+            ADD COLUMN judge_tier TEXT
+            CHECK (judge_tier IS NULL OR judge_tier IN ('tier_0', 'tier_2', 'tier_1'))
+            """
+        )
+        migrated = True
+
+    if migrated or get_meta(conn, "schema_version") != SCHEMA_VERSION:
+        set_meta(conn, "schema_version", SCHEMA_VERSION)
+    return migrated
+
+
 def init_schema(
     conn: sqlite3.Connection,
     *,
@@ -197,6 +228,7 @@ def init_schema(
     """Idempotently initialize all SQLite tables, FTS5 triggers, sqlite-vec, and metadata."""
     conn.executescript(BASE_SCHEMA_SQL)
     with conn:
+        migrate_schema(conn)
         set_meta(conn, "schema_version", SCHEMA_VERSION)
         ensure_vec_table(
             conn,

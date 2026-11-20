@@ -14,10 +14,22 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from optcg_knowledge.config import Settings, get_settings
+from optcg_knowledge.curation.rulings import (
+    add_ruling as curate_add_ruling,
+)
+from optcg_knowledge.curation.rulings import (
+    export_rulings as curate_export_rulings,
+)
+from optcg_knowledge.curation.rulings import (
+    list_unreviewed_rulings as curate_list_unreviewed_rulings,
+)
+from optcg_knowledge.curation.rulings import (
+    mark_ruling as curate_mark_ruling,
+)
 from optcg_knowledge.db.connection import open_db
-from optcg_knowledge.db.schema import get_meta, init_schema
+from optcg_knowledge.db.schema import get_meta, init_schema, migrate_schema
 from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbedder
-from optcg_knowledge.mcp.prompts import build_juiz_prompt
+from optcg_knowledge.mcp.prompts import build_curar_prompt, build_juiz_prompt
 from optcg_knowledge.search.hybrid import hybrid_search
 from optcg_knowledge.search.queries import (
     get_card as query_get_card,
@@ -124,6 +136,9 @@ def _open_query_db(settings: Settings) -> Iterator[sqlite3.Connection]:
                 embedding_dim=settings.embedding_dim,
                 embedding_model=settings.embedding_model,
             )
+        else:
+            with conn:
+                migrate_schema(conn)
         yield conn
 
 
@@ -134,7 +149,7 @@ def create_server(
     embedder: Embedder | None = None,
     search_mode: str | None = None,
 ) -> MCPServer:
-    """Create and configure the `optcg-knowledge` MCP server with Phase 2 tools and prompts."""
+    """Create and configure the `optcg-knowledge` MCP server with all tools and prompts."""
     resolved_settings = settings or get_settings(
         db_path=db_path,
         search_mode=search_mode,
@@ -256,8 +271,9 @@ def create_server(
         name="get_card_rulings",
         description=(
             "Retrieve official FAQs, errata, and judge rulings linked to a canonical card_id "
-            "(e.g. 'OP05-119'), ordered by authority ASC (1 highest .. 4 lowest) then date DESC. "
-            "Excludes superseded rulings by default unless include_superseded=True."
+            "(e.g. 'OP05-119'), ordered by authority ASC (1 highest .. 4 lowest), judge_tier "
+            "(tier_0 > tier_2 > tier_1), then date DESC. Excludes superseded rulings by default "
+            "unless include_superseded=True."
         ),
     )
     def get_card_rulings(card_id: str, include_superseded: bool = False) -> dict[str, Any]:
@@ -269,17 +285,130 @@ def create_server(
                 include_superseded=include_superseded,
             )
 
+    @server.tool(
+        name="add_ruling",
+        description=(
+            "Add a curated OPTCG ruling (always enters with reviewed=False) and index its chunk "
+            "immediately in FTS5. Authority is derived from source ('official_faq'/'errata'=2, "
+            "'judge'=3, 'community'=4). Optional judge_tier ('tier_0' | 'tier_2' | 'tier_1', "
+            "precedence tier_0 > tier_2 > tier_1) is valid for source='judge'. Never pass "
+            "personal names, @handles, or Discord user IDs."
+        ),
+    )
+    def add_ruling(
+        question: str,
+        answer: str,
+        source: str,
+        date: str | None = None,
+        card_ids: list[str] | None = None,
+        rule_refs: list[str] | None = None,
+        url: str | None = None,
+        raw_ref: str | None = None,
+        rules_version: str | None = None,
+        judge_tier: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a new curated ruling with reviewed=False and canonical card/rule links."""
+        with _open_query_db(resolved_settings) as conn:
+            return curate_add_ruling(
+                conn,
+                question=question,
+                answer=answer,
+                source=source,
+                date=date,
+                card_ids=card_ids,
+                rule_refs=rule_refs,
+                url=url,
+                raw_ref=raw_ref,
+                rules_version=rules_version,
+                judge_tier=judge_tier,
+            )
+
+    @server.tool(
+        name="mark_ruling",
+        description=(
+            "Update a ruling's reviewed status, link it as superseded_by a newer ruling_id, "
+            "and/or set judge_tier ('tier_0' | 'tier_2' | 'tier_1' for source='judge'). "
+            "Never deletes outdated rulings; rejects self-superseding and circular chains."
+        ),
+    )
+    def mark_ruling(
+        ruling_id: str,
+        reviewed: bool | None = None,
+        superseded_by: str | None = None,
+        judge_tier: str | None = None,
+    ) -> dict[str, Any]:
+        """Mark a ruling as reviewed, superseded_by another ruling, or update its judge_tier."""
+        with _open_query_db(resolved_settings) as conn:
+            return curate_mark_ruling(
+                conn,
+                ruling_id,
+                reviewed=reviewed,
+                superseded_by=superseded_by,
+                judge_tier=judge_tier,
+            )
+
+    @server.tool(
+        name="list_unreviewed_rulings",
+        description=(
+            "List curated rulings pending human review (reviewed=False), ordered by authority, "
+            "judge_tier (tier_0 > tier_2 > tier_1), and date DESC (default limit=20, max 100)."
+        ),
+    )
+    def list_unreviewed_rulings(limit: int = 20) -> dict[str, Any]:
+        """Return rulings awaiting curation review."""
+        with _open_query_db(resolved_settings) as conn:
+            return curate_list_unreviewed_rulings(conn, limit=limit)
+
+    @server.tool(
+        name="export_rulings",
+        description=(
+            "Export rulings in a stable, versioned JSON envelope (shared with `optcg-ingest "
+            "export-rulings`) for downstream consumers such as optcg-engine. Defaults to reviewed, "
+            "non-superseded rulings; filter optionally by card_id, since (YYYY-MM-DD), and "
+            "min_authority (authority <= N)."
+        ),
+    )
+    def export_rulings(
+        card_id: str | None = None,
+        since: str | None = None,
+        min_authority: int | None = None,
+        include_superseded: bool = False,
+        include_unreviewed: bool = False,
+    ) -> dict[str, Any]:
+        """Export vetted OPTCG rulings as stable structured JSON."""
+        with _open_query_db(resolved_settings) as conn:
+            return curate_export_rulings(
+                conn,
+                card_id=card_id,
+                since=since,
+                min_authority=min_authority,
+                include_superseded=include_superseded,
+                include_unreviewed=include_unreviewed,
+            )
+
     @server.prompt(
         name="juiz",
         description=(
             "OPTCG rules judge workflow: consult rules/cards/rulings, follow authority hierarchy "
-            "(1=rules > 2=official_faq/errata > 3=judge > 4=community), cite exact IDs, surface "
-            "conflicts and outdated rulings."
+            "(1=rules > 2=official_faq/errata > 3=judge [tier_0 > tier_2 > tier_1] > 4=community), "
+            "cite exact IDs, surface conflicts and outdated rulings."
         ),
     )
     def juiz(question: str = "") -> str:
         """Return judge instructions optionally seeded with the user's rules question."""
         return build_juiz_prompt(question)
+
+    @server.prompt(
+        name="curar",
+        description=(
+            "Judge chat curation workflow: read a raw export under data/raw/judge_chats/, "
+            "extract Q&A pairs, respect judge tiers (tier_0 > tier_2 > tier_1), strip personal "
+            "identifiers, verify card/rule links, and call add_ruling."
+        ),
+    )
+    def curar(arquivo: str) -> str:
+        """Return curation instructions targeting a file under data/raw/judge_chats/."""
+        return build_curar_prompt(arquivo)
 
     return server
 

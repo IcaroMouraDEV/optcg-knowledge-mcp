@@ -19,6 +19,9 @@ Follow these mandatory rules for every ruling question:
      card text takes precedence).
    - `authority = 2` (`official_faq` / `errata`): Official Bandai card FAQs and errata.
    - `authority = 3` (`judge`): Official Bandai judge group rulings.
+     When comparing multiple judge rulings at `authority = 3`, follow the official judge tier
+     precedence: `tier_0` (highest) > `tier_2` > `tier_1` > unspecified. Cite the tier
+     (e.g., `judge / tier_0`) when relevant, never personal names.
    - `authority = 4` (`community`): Community rulings (lowest authority).
    - Base your final answer on the highest-authority source applicable to the interaction.
 
@@ -55,3 +58,86 @@ def build_juiz_prompt(question: str = "") -> str:
     if not cleaned:
         return _JUIZ_BASE_INSTRUCTIONS
     return f"{_JUIZ_BASE_INSTRUCTIONS}\n\n---\n\nUser rules question:\n{cleaned}"
+
+
+_CURAR_INSTRUCTIONS_TEMPLATE = """\
+You are curating One Piece Card Game (OPTCG) judge rulings from a raw chat/forum export into \
+the `optcg-knowledge` MCP server.
+
+Target file under `data/raw/judge_chats/`: `{target_path}`
+
+Follow these mandatory curation steps:
+
+1. **Read the raw export safely:**
+   - Read `{target_path}` (never access paths outside `data/raw/judge_chats/`).
+   - Expect Discord forum threads (separated by `---`, optionally tagged with `[PLAYER]`, \
+`[JUDGE T0]`, `[JUDGE T2]`, `[JUDGE T1]`, or `[JUDGE]`) or raw chat logs.
+   - Skip off-topic chatter, unconfirmed player speculation, and unanswered questions.
+
+2. **Extract Q&A pairs and respect judge tiers (`tier_0 > tier_2 > tier_1`):**
+   - Identify genuine player question + certified judge answer exchanges.
+   - Map judge tier markers to canonical `judge_tier` values:
+     - `[JUDGE T0]` / Tier 0 -> `judge_tier="tier_0"` (highest judge authority)
+     - `[JUDGE T2]` / Tier 2 -> `judge_tier="tier_2"` (highest normally attainable judge tier)
+     - `[JUDGE T1]` / Tier 1 -> `judge_tier="tier_1"` (basic certified judge)
+     - `[JUDGE]` / unspecified -> `judge_tier=None`
+   - If multiple judges reply in the same thread and a higher-tier judge clarifies or corrects \
+a lower-tier reply, keep the highest-tier ruling as the authoritative answer.
+   - Preserve exact OPTCG terminology, phase names, and bracketed keywords \
+(`[On Play]`, `[Blocker]`, `[Once Per Turn]`, `[DON!! x1]`) without inventing mechanics.
+
+3. **Strict anonymization (privacy invariant):**
+   - Strip ALL personal names, nicknames, `@handles`, Discord `username#0000` tags, raw user \
+mentions (`<@...>`), phone numbers, and user IDs from `question`, `answer`, and `raw_ref`.
+   - Record only the ruling content, `source="judge"` (`authority=3`), optional `judge_tier`, \
+and a minimal `raw_ref` (e.g., `{file_name}#thread-1` or `{file_name}#L10-L24`).
+
+4. **Resolve and verify canonical entity links:**
+   - Look up every referenced card via `get_card` (or `search_cards`) to obtain canonical \
+`card_id` values (e.g., `OP05-119`, `ST10-001`, `P-001`).
+   - Look up every referenced rule via `get_rule` to verify canonical `rule_id` values \
+(e.g., `7-1-4-1`).
+   - Check existing rulings via `get_card_rulings` to see whether a new judge ruling duplicates \
+or supersedes an older ruling.
+
+5. **Persist via MCP tools (never delete old rulings):**
+   - Call `add_ruling(question=..., answer=..., source="judge", date="YYYY-MM-DD", \
+card_ids=[...], rule_refs=[...], judge_tier=..., raw_ref=...)` for each extracted ruling.
+   - Newly added rulings enter with `reviewed=False` for human verification.
+   - If a newly added ruling clearly supersedes an older ruling (e.g., a newer `tier_0`/`tier_2` \
+ruling overriding an older `tier_1` ruling), note the candidate pair or call \
+`mark_ruling(old_id, superseded_by=new_id)` when unambiguous—never delete outdated rulings.
+
+6. **Final curation report:**
+   - Summarize how many rulings were extracted and stored (listing each `ruling_id`, `judge_tier`, \
+`card_ids`, `rule_ids`, and any warnings).
+   - Confirm zero personal identifiers remain in stored fields, and remind the user to review \
+pending entries with `list_unreviewed_rulings`, approve them with \
+`mark_ruling(..., reviewed=True)`, and run `uv run optcg-ingest embed` to index their vectors.\
+"""
+
+
+def build_curar_prompt(arquivo: str) -> str:
+    """Build the `curar(arquivo)` MCP prompt for curating a judge chat export file."""
+    cleaned = arquivo.strip()
+    if not cleaned:
+        raise ValueError("arquivo must be a non-empty filename under data/raw/judge_chats/")
+
+    normalized = cleaned.replace("\\", "/")
+    if normalized.startswith("/") or ".." in normalized.split("/"):
+        raise ValueError(
+            "arquivo must be a relative path inside data/raw/judge_chats/ without '..' segments"
+        )
+
+    prefix = "data/raw/judge_chats/"
+    if normalized.startswith(prefix):
+        target_path = normalized
+        file_name = normalized[len(prefix) :]
+    else:
+        file_name = normalized
+        target_path = f"{prefix}{normalized}"
+
+    return _CURAR_INSTRUCTIONS_TEMPLATE.format(
+        target_path=target_path,
+        file_name=file_name,
+    )

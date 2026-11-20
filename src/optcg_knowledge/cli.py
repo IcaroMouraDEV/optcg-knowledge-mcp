@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from optcg_knowledge.config import Settings, get_settings
-from optcg_knowledge.db import open_db
+from optcg_knowledge.curation.rulings import export_rulings
+from optcg_knowledge.db import init_schema, migrate_schema, open_db
 from optcg_knowledge.ingest.cards_importer import ingest_cards
 from optcg_knowledge.ingest.embed_pipeline import embed_chunks
 from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbedder
@@ -175,6 +177,46 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-embed all chunks even if their content_hash is already indexed.",
     )
 
+    export_parser = subparsers.add_parser(
+        "export-rulings",
+        help="Export vetted rulings in a stable JSON envelope for downstream consumers.",
+    )
+    export_parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output JSON file path (writes to stdout when omitted).",
+    )
+    export_parser.add_argument(
+        "--card-id",
+        dest="card_id",
+        default=None,
+        help="Filter exported rulings by canonical card_id (e.g., OP05-119).",
+    )
+    export_parser.add_argument(
+        "--since",
+        default=None,
+        help="Filter exported rulings with date >= YYYY-MM-DD.",
+    )
+    export_parser.add_argument(
+        "--min-authority",
+        dest="min_authority",
+        type=int,
+        choices=(1, 2, 3, 4),
+        default=None,
+        help="Filter exported rulings with authority <= N (1=rules .. 4=community).",
+    )
+    export_parser.add_argument(
+        "--include-superseded",
+        action="store_true",
+        help="Include rulings marked with superseded_by.",
+    )
+    export_parser.add_argument(
+        "--include-unreviewed",
+        action="store_true",
+        help="Include rulings that have not been reviewed yet (reviewed=False).",
+    )
+
     return parser
 
 
@@ -302,6 +344,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"rebuilt={summary.rebuilt_vec_table}, model={summary.model_name}, "
             f"dim={summary.dimension})"
         )
+        return 0
+
+    if args.command == "export-rulings":
+        with open_db(settings.db_path, init=False) as conn:
+            has_rulings = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rulings'"
+            ).fetchone()
+            if has_rulings is None:
+                init_schema(
+                    conn,
+                    embedding_model=settings.embedding_model,
+                    embedding_dim=settings.embedding_dim,
+                )
+            else:
+                with conn:
+                    migrate_schema(conn)
+
+            payload = export_rulings(
+                conn,
+                card_id=args.card_id,
+                since=args.since,
+                min_authority=args.min_authority,
+                include_superseded=args.include_superseded,
+                include_unreviewed=args.include_unreviewed,
+            )
+
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(f"{serialized}\n", encoding="utf-8")
+            print(f"Exported {payload['total']} rulings to {args.out}")
+        else:
+            print(serialized)
         return 0
 
     parser.error(f"Unsupported command: {args.command}")
