@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Lint, Test & Validate Rulings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install core and dev dependencies (no ML extras)
+        run: uv sync --frozen --dev
+
+      - name: Lint with ruff (including T201 stdio safety)
+        run: uv run --no-sync ruff check
+
+      - name: Run offline test suite
+        run: uv run --no-sync pytest -v
+
+      - name: Validate tracked rulings under data/rulings/
+        run: uv run --no-sync optcg-ingest validate-rulings data/rulings

@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from optcg_knowledge.db.connection import open_db
 from optcg_knowledge.db.models import (
     JudgeTier,
     RulingRecord,
@@ -38,6 +39,8 @@ _SOURCE_PREFIX: dict[str, str] = {
 
 _CARD_ID_RE = re.compile(r"^(?:(?:OP|ST|EB|PRB)\d{2}-\d{3}|P-\d{3})$", re.IGNORECASE)
 _RULE_ID_RE = re.compile(r"^\d+(?:-\d+){1,4}$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_CROSS_SOURCE_PREFIXES: tuple[str, ...] = ("faq:", "errata:")
 
 # Privacy guards: block raw Discord user mentions, @handles, and legacy name#1234 tags.
 _DISCORD_MENTION_RE = re.compile(r"<@!?\d{15,22}>")
@@ -93,17 +96,17 @@ def _check_no_pii(text: str | None, *, field_name: str, check_discriminator: boo
     if _DISCORD_MENTION_RE.search(text):
         raise ValueError(
             f"{field_name} contains a raw Discord user mention (<@...>); "
-            "strip all personal identifiers before calling add_ruling."
+            "strip all personal identifiers before storing or committing rulings."
         )
     if _AT_HANDLE_RE.search(text):
         raise ValueError(
             f"{field_name} contains an @handle; "
-            "strip all personal names and handles before calling add_ruling."
+            "strip all personal names and handles before storing or committing rulings."
         )
     if check_discriminator and _DISCORD_DISCRIMINATOR_RE.search(text):
         raise ValueError(
             f"{field_name} contains a Discord username#0000 tag; "
-            "strip all personal identifiers before calling add_ruling."
+            "strip all personal identifiers before storing or committing rulings."
         )
 
 
@@ -974,4 +977,392 @@ def import_rulings(
         rule_links_upserted=rule_links_upserted,
         superseded_links_applied=superseded_applied,
         chunks_upserted=chunks_upserted,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ValidateRulingsSummary:
+    """Counters returned after validating tracked rulings files and running an SQLite dry-run."""
+
+    json_files_checked: int
+    thread_files_checked: int
+    rulings_checked: int
+    superseded_links_checked: int
+    warnings: tuple[str, ...]
+
+
+class RulingsValidationError(ValueError):
+    """Raised when tracked rulings files fail schema, privacy, or integrity validation."""
+
+    def __init__(self, errors: Sequence[str]) -> None:
+        self.errors: tuple[str, ...] = tuple(errors)
+        joined = "\n".join(f"  - {err}" for err in self.errors)
+        super().__init__(
+            f"Rulings validation failed with {len(self.errors)} error(s):\n{joined}"
+        )
+
+
+def _validate_string_id_list(
+    raw_value: Any,
+    *,
+    field_name: str,
+    location: str,
+    pattern: re.Pattern[str],
+    require_uppercase: bool,
+    example: str,
+    errors: list[str],
+) -> None:
+    if raw_value is None:
+        return
+    if not isinstance(raw_value, list):
+        errors.append(f"{location}: {field_name} must be a list of strings")
+        return
+    for item in raw_value:
+        if not isinstance(item, str) or not item.strip():
+            errors.append(
+                f"{location}: {field_name} contains non-string or empty entry {item!r}"
+            )
+            continue
+        expected = item.strip().upper() if require_uppercase else item.strip()
+        if item != expected or not pattern.match(item):
+            errors.append(
+                f"{location}: invalid canonical {field_name} entry {item!r} "
+                f"(expected format like {example!r})"
+            )
+
+
+def _validate_ruling_entry(
+    item: Any,
+    *,
+    file_path: Path,
+    index: int,
+    seen_ruling_ids: dict[str, Path],
+    pending_superseded: list[tuple[str, str, Path]],
+    errors: list[str],
+) -> bool:
+    location = f"{file_path} [rulings[{index}]]"
+    if not isinstance(item, dict):
+        errors.append(f"{location}: each ruling entry must be a JSON object")
+        return False
+
+    raw_id = item.get("ruling_id")
+    ruling_id: str | None = None
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        errors.append(f"{location}: ruling_id must be a non-empty string")
+    else:
+        ruling_id = raw_id.strip()
+        if ruling_id != raw_id:
+            errors.append(f"{location}: ruling_id {raw_id!r} must not have leading/trailing spaces")
+        location = f"{file_path} [{ruling_id}]"
+        if ruling_id in seen_ruling_ids:
+            errors.append(
+                f"{location}: duplicate ruling_id (already defined in {seen_ruling_ids[ruling_id]})"
+            )
+        else:
+            seen_ruling_ids[ruling_id] = file_path
+
+    raw_question = item.get("question")
+    if not isinstance(raw_question, str) or not raw_question.strip():
+        errors.append(f"{location}: question must be a non-empty string")
+    else:
+        try:
+            _check_no_pii(raw_question, field_name="question")
+        except ValueError as exc:
+            errors.append(f"{location}: {exc}")
+
+    raw_answer = item.get("answer")
+    if not isinstance(raw_answer, str) or not raw_answer.strip():
+        errors.append(f"{location}: answer must be a non-empty string")
+    else:
+        try:
+            _check_no_pii(raw_answer, field_name="answer")
+        except ValueError as exc:
+            errors.append(f"{location}: {exc}")
+
+    raw_source = item.get("source")
+    typed_source: SourceType | None = None
+    if not isinstance(raw_source, str) or raw_source.strip().lower() not in CURATABLE_SOURCES:
+        valid = ", ".join(sorted(CURATABLE_SOURCES))
+        errors.append(
+            f"{location}: unsupported source {raw_source!r}; expected one of: {valid}"
+        )
+    else:
+        cleaned_source = raw_source.strip().lower()
+        if raw_source != cleaned_source:
+            errors.append(
+                f"{location}: source {raw_source!r} must be canonical lowercase {cleaned_source!r}"
+            )
+        typed_source = cleaned_source  # type: ignore[assignment]
+
+    if "authority" in item and item["authority"] is not None:
+        raw_auth = item["authority"]
+        if isinstance(raw_auth, bool) or not isinstance(raw_auth, int):
+            errors.append(f"{location}: authority must be an integer, got {raw_auth!r}")
+        elif typed_source is not None:
+            expected_auth = authority_for_source(typed_source)
+            if raw_auth != expected_auth:
+                errors.append(
+                    f"{location}: authority={raw_auth} does not match "
+                    f"source={typed_source!r} (expected {expected_auth})"
+                )
+
+    raw_tier = item.get("judge_tier")
+    if raw_tier is not None:
+        if not isinstance(raw_tier, str):
+            errors.append(f"{location}: judge_tier must be a string or null, got {raw_tier!r}")
+        else:
+            try:
+                normalized_tier = normalize_judge_tier(raw_tier)
+            except ValueError as exc:
+                errors.append(f"{location}: {exc}")
+            else:
+                if normalized_tier is not None and typed_source is not None:
+                    if typed_source != "judge":
+                        errors.append(
+                            f"{location}: judge_tier can only be set when source == 'judge'"
+                        )
+                    elif raw_tier != normalized_tier:
+                        errors.append(
+                            f"{location}: judge_tier {raw_tier!r} must use canonical value "
+                            f"{normalized_tier!r}"
+                        )
+
+    raw_date = item.get("date")
+    if raw_date is not None:
+        if not isinstance(raw_date, str) or not _ISO_DATE_RE.match(raw_date):
+            errors.append(
+                f"{location}: date {raw_date!r} must be an ISO string 'YYYY-MM-DD'"
+            )
+        else:
+            try:
+                _normalize_date(raw_date, field_name="date")
+            except ValueError as exc:
+                errors.append(f"{location}: {exc}")
+
+    if "reviewed" in item and item["reviewed"] is not None and not isinstance(
+        item["reviewed"], bool
+    ):
+        errors.append(f"{location}: reviewed must be a boolean, got {item['reviewed']!r}")
+
+    for optional_text_field in ("raw_ref", "url"):
+        val = item.get(optional_text_field)
+        if val is not None:
+            if not isinstance(val, str):
+                errors.append(f"{location}: {optional_text_field} must be a string or null")
+            else:
+                try:
+                    _check_no_pii(
+                        val,
+                        field_name=optional_text_field,
+                        check_discriminator=False,
+                    )
+                except ValueError as exc:
+                    errors.append(f"{location}: {exc}")
+
+    _validate_string_id_list(
+        item.get("card_ids"),
+        field_name="card_ids",
+        location=location,
+        pattern=_CARD_ID_RE,
+        require_uppercase=True,
+        example="OP05-119",
+        errors=errors,
+    )
+    if "rule_refs" in item:
+        errors.append(
+            f"{location}: unexpected key 'rule_refs'; use canonical export key 'rule_ids'"
+        )
+    _validate_string_id_list(
+        item.get("rule_ids"),
+        field_name="rule_ids",
+        location=location,
+        pattern=_RULE_ID_RE,
+        require_uppercase=False,
+        example="7-1-4-1",
+        errors=errors,
+    )
+
+    raw_superseded = item.get("superseded_by")
+    if raw_superseded is not None:
+        if not isinstance(raw_superseded, str) or not raw_superseded.strip():
+            errors.append(f"{location}: superseded_by must be a non-empty string or null")
+        elif ruling_id is not None:
+            pending_superseded.append((ruling_id, raw_superseded.strip(), file_path))
+
+    return True
+
+
+def _detect_superseded_cycles(
+    edges: dict[str, str],
+) -> list[str]:
+    """Return human-readable descriptions of any cycles in a ``ruling_id -> target_id`` map."""
+    cycle_errors: list[str] = []
+    reported_cycles: set[tuple[str, ...]] = set()
+    for start_id in sorted(edges):
+        visited_index: dict[str, int] = {}
+        chain: list[str] = []
+        cursor: str | None = start_id
+        while cursor is not None and cursor in edges:
+            if cursor in visited_index:
+                cycle = chain[visited_index[cursor] :]
+                canonical_cycle = tuple(sorted(cycle))
+                if canonical_cycle not in reported_cycles:
+                    reported_cycles.add(canonical_cycle)
+                    cycle_repr = " -> ".join([*cycle, cursor])
+                    cycle_errors.append(f"Circular superseded_by chain detected: {cycle_repr}")
+                break
+            visited_index[cursor] = len(chain)
+            chain.append(cursor)
+            cursor = edges.get(cursor)
+    return cycle_errors
+
+
+def validate_rulings(source_path: Path | str) -> ValidateRulingsSummary:
+    """Validate tracked rulings JSON files, thread transcripts, and SQLite dry-run import.
+
+    Checks:
+    1. Valid JSON matching the ``export_rulings`` envelope (``schema_version = "1.0"``).
+    2. Canonical ``card_ids`` / ``rule_ids``, matching ``authority`` for ``source``, valid
+       ``judge_tier``, unique ``ruling_id``s, and ISO dates.
+    3. Zero Discord PII (``<@...>``, ``@handle``, ``user#0000``) in JSON fields and tracked
+       ``threads/*.md`` files (excluding ``TEMPLATE.md``).
+    4. ``superseded_by`` integrity (errors on self-superseding, cycles, or missing in-repo
+       targets; warnings on cross-source ``faq:`` / ``errata:`` targets) plus an end-to-end
+       dry-run ``import_rulings`` into an isolated in-memory SQLite database.
+    """
+    path = Path(source_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Rulings path not found: {path}")
+
+    if path.is_file():
+        if path.suffix.lower() != ".json":
+            raise RulingsValidationError(
+                [f"Expected a .json rulings file or directory, got: {path}"]
+            )
+        json_files = [path]
+        thread_files: list[Path] = []
+    else:
+        json_files = sorted(p for p in path.rglob("*.json") if p.is_file())
+        if not json_files:
+            raise FileNotFoundError(f"No .json rulings files found in {path}")
+        threads_dir = path / "threads"
+        thread_files = (
+            sorted(
+                p
+                for p in threads_dir.rglob("*.md")
+                if p.is_file() and p.name.upper() != "TEMPLATE.MD"
+            )
+            if threads_dir.is_dir()
+            else []
+        )
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    seen_ruling_ids: dict[str, Path] = {}
+    pending_superseded: list[tuple[str, str, Path]] = []
+    rulings_checked = 0
+
+    for file_path in json_files:
+        try:
+            parsed = json.loads(file_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            errors.append(f"{file_path}: invalid JSON ({exc})")
+            continue
+
+        if not isinstance(parsed, dict):
+            errors.append(
+                f"{file_path}: root value must be an export_rulings JSON object, "
+                f"got {type(parsed).__name__}"
+            )
+            continue
+
+        schema_ver = parsed.get("schema_version")
+        if schema_ver != EXPORT_SCHEMA_VERSION:
+            errors.append(
+                f"{file_path}: expected schema_version={EXPORT_SCHEMA_VERSION!r}, "
+                f"got {schema_ver!r}"
+            )
+
+        raw_rulings = parsed.get("rulings")
+        if not isinstance(raw_rulings, list):
+            errors.append(f"{file_path}: 'rulings' field must be a list")
+            continue
+
+        if "total" in parsed:
+            raw_total = parsed["total"]
+            if (
+                isinstance(raw_total, bool)
+                or not isinstance(raw_total, int)
+                or raw_total != len(raw_rulings)
+            ):
+                errors.append(
+                    f"{file_path}: total={raw_total!r} does not match "
+                    f"len(rulings)={len(raw_rulings)}"
+                )
+
+        for idx, item in enumerate(raw_rulings):
+            rulings_checked += 1
+            _validate_ruling_entry(
+                item,
+                file_path=file_path,
+                index=idx,
+                seen_ruling_ids=seen_ruling_ids,
+                pending_superseded=pending_superseded,
+                errors=errors,
+            )
+
+    for thread_path in thread_files:
+        content = thread_path.read_text(encoding="utf-8")
+        for line_no, line in enumerate(content.splitlines(), start=1):
+            try:
+                _check_no_pii(line, field_name=f"{thread_path}:{line_no}")
+            except ValueError as exc:
+                errors.append(str(exc))
+
+    superseded_edges: dict[str, str] = {}
+    for ruling_id, target_id, file_path in pending_superseded:
+        if target_id == ruling_id:
+            errors.append(f"{file_path} [{ruling_id}]: ruling cannot supersede itself")
+            continue
+        if target_id not in seen_ruling_ids:
+            if target_id.startswith(_CROSS_SOURCE_PREFIXES):
+                warnings.append(
+                    f"{file_path} [{ruling_id}]: superseded_by target {target_id!r} "
+                    "references an official FAQ/errata ruling outside this directory "
+                    "(skipped in standalone dry-run)"
+                )
+            else:
+                errors.append(
+                    f"{file_path} [{ruling_id}]: superseded_by target {target_id!r} "
+                    f"not found in {path}"
+                )
+            continue
+        superseded_edges[ruling_id] = target_id
+
+    errors.extend(_detect_superseded_cycles(superseded_edges))
+
+    if errors:
+        raise RulingsValidationError(errors)
+
+    # End-to-end dry-run import into an isolated in-memory SQLite DB (FTS5 + sqlite-vec).
+    try:
+        with open_db(":memory:", init=True) as conn:
+            import_summary = import_rulings(conn, path)
+    except ValueError as exc:
+        raise RulingsValidationError([f"SQLite dry-run import failed: {exc}"]) from exc
+
+    if import_summary.rulings_upserted != rulings_checked:
+        raise RulingsValidationError(
+            [
+                f"SQLite dry-run imported {import_summary.rulings_upserted} rulings "
+                f"but validated {rulings_checked} entries"
+            ]
+        )
+
+    return ValidateRulingsSummary(
+        json_files_checked=len(json_files),
+        thread_files_checked=len(thread_files),
+        rulings_checked=rulings_checked,
+        superseded_links_checked=len(pending_superseded),
+        warnings=tuple(warnings),
     )
