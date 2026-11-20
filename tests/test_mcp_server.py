@@ -24,7 +24,7 @@ def _extract_json_payload(call_result: Any) -> dict[str, Any]:
     return parsed
 
 
-def test_mcp_server_registers_phase2_tools_and_prompt(
+def test_mcp_server_registers_all_tools_and_prompts(
     populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -43,8 +43,12 @@ def test_mcp_server_registers_phase2_tools_and_prompt(
         "get_card",
         "search_cards",
         "get_card_rulings",
+        "add_ruling",
+        "mark_ruling",
+        "list_unreviewed_rulings",
+        "export_rulings",
     }
-    assert prompt_names == ["juiz"]
+    assert set(prompt_names) == {"juiz", "curar"}
 
     # Strict stdio protocol integrity: nothing written to stdout.
     assert capsys.readouterr().out == ""

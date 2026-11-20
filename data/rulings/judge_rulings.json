@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "exported_at": "2026-11-20T04:35:59+00:00",
+  "rules_version": null,
+  "filters": {
+    "card_id": null,
+    "since": null,
+    "min_authority": null,
+    "source": "judge",
+    "include_superseded": false,
+    "include_unreviewed": false
+  },
+  "total": 1,
+  "rulings": [
+    {
+      "ruling_id": "judge:OP17-044:a46c51d360f8",
+      "question": "If Captain John (OP17-044) is rested while my Leader has type \"Rocks Pirates\" and my opponent declares an illegal attack into my Leader despite Captain John's restriction, is the attack rewound or must the opponent redirect the attack to a legal target?",
+      "answer": "Because this involves remediating an illegal game action in tournament play, the ruling depends on context and a judge investigation:\n- Scenario A: If the player rested an attacker, declared an attack, scanned the board, and then chose the Leader (an illegal target), the judge typically has the player choose a valid target for the attack (Captain John).\n- Scenario B: If the player explicitly declared \"I attack Leader with [attacker]\" and rested the card as a single illegal action, rewinding the attack may apply.\nAlways call a judge to investigate the exact sequence of actions.",
+      "source": "judge",
+      "authority": 3,
+      "judge_tier": null,
+      "date": "2026-11-18",
+      "rules_version": null,
+      "url": null,
+      "raw_ref": "data/rulings/threads/2026-11-18-captain-john-rested.md",
+      "superseded_by": null,
+      "reviewed": true,
+      "potentially_outdated": false,
+      "card_ids": [
+        "OP17-044"
+      ],
+      "rule_ids": [
+        "7-1-1-1"
+      ]
+    }
+  ]
+}

@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from optcg_knowledge.db.models import judge_tier_rank
 from optcg_knowledge.db.schema import get_meta
 from optcg_knowledge.ingest.embeddings import Embedder, serialize_vector
 from optcg_knowledge.search.query_parser import (
@@ -28,6 +29,12 @@ EXACT_LINKED_RULING_BOOST = 0.045
 EXACT_KEYWORD_BOOST = 0.035
 EXACT_KEYWORD_MAX_BOOST = 0.07
 AUTHORITY_STEP_BOOST = 0.0005
+# Intra-authority tie-breaking within authority = 3 (strictly < AUTHORITY_STEP_BOOST).
+JUDGE_TIER_BOOST: dict[str, float] = {
+    "tier_0": 0.00015,
+    "tier_2": 0.00010,
+    "tier_1": 0.00005,
+}
 
 
 @dataclass(slots=True)
@@ -45,6 +52,7 @@ class _Candidate:
     ruling_rules_version: str | None
     ruling_reviewed: bool | None
     ruling_url: str | None
+    ruling_judge_tier: str | None = None
     bm25_rank: int | None = None
     vec_rank: int | None = None
     exact_boost: float = 0.0
@@ -119,6 +127,7 @@ def _row_to_candidate(row: sqlite3.Row) -> _Candidate:
         raw_reviewed = row["ruling_reviewed"]
         ruling_reviewed = bool(raw_reviewed) if raw_reviewed is not None else None
         ruling_url = row["ruling_url"]
+        ruling_judge_tier = row["ruling_judge_tier"]
         if ruling_date is not None:
             metadata["date"] = ruling_date
         if ruling_rules_version is not None:
@@ -127,6 +136,8 @@ def _row_to_candidate(row: sqlite3.Row) -> _Candidate:
             metadata["reviewed"] = ruling_reviewed
         if ruling_url is not None:
             metadata["url"] = ruling_url
+        if ruling_judge_tier is not None:
+            metadata["judge_tier"] = ruling_judge_tier
     elif doc_type == "rule":
         source = "rules"
         superseded_by = None
@@ -134,6 +145,7 @@ def _row_to_candidate(row: sqlite3.Row) -> _Candidate:
         ruling_rules_version = None
         ruling_reviewed = None
         ruling_url = None
+        ruling_judge_tier = None
     else:
         source = "card"
         superseded_by = None
@@ -141,6 +153,7 @@ def _row_to_candidate(row: sqlite3.Row) -> _Candidate:
         ruling_rules_version = None
         ruling_reviewed = None
         ruling_url = None
+        ruling_judge_tier = None
 
     return _Candidate(
         rowid=int(row["rowid"]),
@@ -158,6 +171,7 @@ def _row_to_candidate(row: sqlite3.Row) -> _Candidate:
         ),
         ruling_reviewed=ruling_reviewed,
         ruling_url=str(ruling_url) if ruling_url is not None else None,
+        ruling_judge_tier=str(ruling_judge_tier) if ruling_judge_tier is not None else None,
     )
 
 
@@ -175,7 +189,8 @@ _BASE_SELECT = """
         r.rules_version AS ruling_rules_version,
         r.url AS ruling_url,
         r.superseded_by AS superseded_by,
-        r.reviewed AS ruling_reviewed
+        r.reviewed AS ruling_reviewed,
+        r.judge_tier AS ruling_judge_tier
     FROM chunks c
     LEFT JOIN rulings r ON c.doc_type = 'ruling' AND r.ruling_id = c.doc_id
 """
@@ -468,6 +483,8 @@ def _compute_score(candidate: _Candidate) -> float:
     score += candidate.exact_boost
     # Gentle authority tie-breaker: 1=rules > 2=official_faq/errata > 3=judge > 4=community
     score += (5 - candidate.authority) * AUTHORITY_STEP_BOOST
+    if candidate.authority == 3 and candidate.ruling_judge_tier:
+        score += JUDGE_TIER_BOOST.get(candidate.ruling_judge_tier, 0.0)
     return score
 
 
@@ -564,7 +581,14 @@ def hybrid_search(
                 cand.add_signal("exact_keyword")
 
     scored = [(_compute_score(cand), cand) for cand in candidates.values()]
-    scored.sort(key=lambda item: (-item[0], item[1].authority, item[1].chunk_id))
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            item[1].authority,
+            judge_tier_rank(item[1].ruling_judge_tier),
+            item[1].chunk_id,
+        )
+    )
     top_scored = scored[:k]
 
     results: list[dict[str, Any]] = []
@@ -582,6 +606,7 @@ def hybrid_search(
                 "doc_id": cand.doc_id,
                 "authority": cand.authority,
                 "source": cand.source,
+                "judge_tier": cand.ruling_judge_tier,
                 "score": round(score, 6),
                 "match_signals": list(cand.signals),
                 "text": cand.text,

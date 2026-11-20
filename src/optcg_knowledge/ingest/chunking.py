@@ -126,9 +126,19 @@ def build_card_chunk(card: CardRecord) -> ChunkRecord:
     )
 
 
+_JUDGE_TIER_LABELS: dict[str, str] = {
+    "tier_0": "TIER 0",
+    "tier_2": "TIER 2",
+    "tier_1": "TIER 1",
+}
+
+
 def build_ruling_chunk(ruling: RulingRecord) -> ChunkRecord:
     """Build one chunk per ruling combining question, answer, and linked IDs."""
     source_label = _RULING_SOURCE_LABELS.get(ruling.source, ruling.source.upper())
+    tier_label = _JUDGE_TIER_LABELS.get(ruling.judge_tier or "") if ruling.judge_tier else None
+    tag = f"{source_label} | {tier_label}" if tier_label else source_label
+
     context_parts: list[str] = []
     if ruling.card_ids:
         context_parts.append(f"Cards: {', '.join(ruling.card_ids)}")
@@ -136,9 +146,9 @@ def build_ruling_chunk(ruling: RulingRecord) -> ChunkRecord:
         context_parts.append(f"Rules: {', '.join(ruling.rule_ids)}")
 
     header = (
-        f"[{source_label}] {' | '.join(context_parts)}"
+        f"[{tag}] {' | '.join(context_parts)}"
         if context_parts
-        else f"[{source_label}]"
+        else f"[{tag}]"
     )
     text = f"{header}\nQ: {ruling.question}\nA: {ruling.answer}"
 
@@ -151,6 +161,7 @@ def build_ruling_chunk(ruling: RulingRecord) -> ChunkRecord:
         metadata={
             "ruling_id": ruling.ruling_id,
             "source": ruling.source,
+            "judge_tier": ruling.judge_tier,
             "date": ruling.date,
             "rules_version": ruling.rules_version,
             "url": ruling.url,

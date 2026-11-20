@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from optcg_knowledge.config import Settings, get_settings
-from optcg_knowledge.db import open_db
+from optcg_knowledge.curation.rulings import export_rulings, import_rulings
+from optcg_knowledge.db import init_schema, migrate_schema, open_db
 from optcg_knowledge.ingest.cards_importer import ingest_cards
 from optcg_knowledge.ingest.embed_pipeline import embed_chunks
 from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbedder
 from optcg_knowledge.ingest.faq_parser import ingest_faqs, parse_faq_path
+from optcg_knowledge.ingest.official_downloader import (
+    DEFAULT_OFFICIAL_BASE_URL,
+    fetch_official_docs,
+)
 from optcg_knowledge.ingest.rules_parser import ingest_rules, parse_rules_pdf
 from optcg_knowledge.ingest.sources import CardSource, LocalCardSource, PunkRecordsSource
 
@@ -64,6 +70,33 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "init-db",
         help="Initialize or verify the SQLite schema (FTS5 + sqlite-vec).",
+    )
+
+    fetch_parser = subparsers.add_parser(
+        "fetch-official",
+        help="Download official Bandai Comprehensive Rules PDF, FAQ PDFs, and errata HTML.",
+    )
+    fetch_parser.add_argument(
+        "--only",
+        choices=("all", "rules", "faq", "errata"),
+        default="all",
+        help="Download only a subset of official documents (default: all).",
+    )
+    fetch_parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Target raw data directory (defaults to OPTCG_RAW_DATA_DIR or data/raw).",
+    )
+    fetch_parser.add_argument(
+        "--base-url",
+        default=DEFAULT_OFFICIAL_BASE_URL,
+        help=f"Official site base URL (default: {DEFAULT_OFFICIAL_BASE_URL}).",
+    )
+    fetch_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download files even if they already match the saved revision manifest.",
     )
 
     rules_parser = subparsers.add_parser(
@@ -175,6 +208,64 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-embed all chunks even if their content_hash is already indexed.",
     )
 
+    export_parser = subparsers.add_parser(
+        "export-rulings",
+        help="Export vetted rulings in a stable JSON envelope for downstream consumers.",
+    )
+    export_parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output JSON file path (writes to stdout when omitted).",
+    )
+    export_parser.add_argument(
+        "--card-id",
+        dest="card_id",
+        default=None,
+        help="Filter exported rulings by canonical card_id (e.g., OP05-119).",
+    )
+    export_parser.add_argument(
+        "--since",
+        default=None,
+        help="Filter exported rulings with date >= YYYY-MM-DD.",
+    )
+    export_parser.add_argument(
+        "--min-authority",
+        dest="min_authority",
+        type=int,
+        choices=(1, 2, 3, 4),
+        default=None,
+        help="Filter exported rulings with authority <= N (1=rules .. 4=community).",
+    )
+    export_parser.add_argument(
+        "--source",
+        choices=("official_faq", "errata", "judge", "community"),
+        default=None,
+        help="Filter exported rulings by exact source type (e.g., judge).",
+    )
+    export_parser.add_argument(
+        "--include-superseded",
+        action="store_true",
+        help="Include rulings marked with superseded_by.",
+    )
+    export_parser.add_argument(
+        "--include-unreviewed",
+        action="store_true",
+        help="Include rulings that have not been reviewed yet (reviewed=False).",
+    )
+
+    import_parser = subparsers.add_parser(
+        "import-rulings",
+        help="Idempotently import curated rulings JSON (default: data/rulings).",
+    )
+    import_parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Rulings JSON file or directory (defaults to data/rulings).",
+    )
+
     return parser
 
 
@@ -203,6 +294,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"Initialized database at {settings.db_path} "
             f"(model={settings.embedding_model}, dim={settings.embedding_dim})"
+        )
+        return 0
+
+    if args.command == "fetch-official":
+        out_dir = args.out_dir or settings.raw_data_dir
+        summary = fetch_official_docs(
+            out_dir,
+            only=args.only,
+            base_url=args.base_url,
+            force=args.force,
+        )
+        print(
+            f"Fetched official Bandai docs into {summary.out_dir} "
+            f"(downloaded={summary.downloaded}, skipped={summary.skipped}, "
+            f"rules={summary.rules_files}, faq={summary.faq_files}, errata={summary.errata_files})"
         )
         return 0
 
@@ -301,6 +407,64 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"(skipped={summary.skipped_chunks}, orphans_removed={summary.orphans_removed}, "
             f"rebuilt={summary.rebuilt_vec_table}, model={summary.model_name}, "
             f"dim={summary.dimension})"
+        )
+        return 0
+
+    if args.command == "export-rulings":
+        with open_db(settings.db_path, init=False) as conn:
+            has_rulings = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rulings'"
+            ).fetchone()
+            if has_rulings is None:
+                init_schema(
+                    conn,
+                    embedding_model=settings.embedding_model,
+                    embedding_dim=settings.embedding_dim,
+                )
+            else:
+                with conn:
+                    migrate_schema(conn)
+
+            payload = export_rulings(
+                conn,
+                card_id=args.card_id,
+                since=args.since,
+                min_authority=args.min_authority,
+                source=args.source,
+                include_superseded=args.include_superseded,
+                include_unreviewed=args.include_unreviewed,
+            )
+
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(f"{serialized}\n", encoding="utf-8")
+            print(f"Exported {payload['total']} rulings to {args.out}")
+        else:
+            print(serialized)
+        return 0
+
+    if args.command == "import-rulings":
+        import_path = args.path or (settings.db_path.parent / "rulings")
+        with open_db(settings.db_path, init=False) as conn:
+            has_rulings = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rulings'"
+            ).fetchone()
+            if has_rulings is None:
+                init_schema(
+                    conn,
+                    embedding_model=settings.embedding_model,
+                    embedding_dim=settings.embedding_dim,
+                )
+            else:
+                with conn:
+                    migrate_schema(conn)
+
+            summary = import_rulings(conn, import_path)
+        print(
+            f"Imported {summary.rulings_upserted} rulings from {summary.files_processed} file(s) "
+            f"(card_links={summary.card_links_upserted}, rule_links={summary.rule_links_upserted}, "
+            f"superseded={summary.superseded_links_applied}, chunks={summary.chunks_upserted})"
         )
         return 0
 
