@@ -10,8 +10,7 @@ import json
 import logging
 import re
 import sqlite3
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -20,10 +19,12 @@ from optcg_knowledge.db.models import (
     MAX_COPIES_BY_BAN_STATUS,
     ActiveBanStatus,
     CardRestrictionRecord,
+    RestrictionScope,
     normalize_ban_status,
 )
-from optcg_knowledge.db.schema import set_meta, utc_now_iso
+from optcg_knowledge.db.schema import migrate_schema, set_meta, utc_now_iso
 from optcg_knowledge.ingest.cards_importer import parse_card_id
+from optcg_knowledge.ingest.dates import normalize_official_date
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +35,10 @@ _CARD_ID_RE = re.compile(
     re.IGNORECASE,
 )
 _EFFECTIVE_FROM_RE = re.compile(
-    r"effective\s+from\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}[-/]\d{2}[-/]\d{2})",
+    r"effective\s+from\s+"
+    r"([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4}|\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}/\d{1,2}/\d{4})",
     re.IGNORECASE,
 )
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_SLASH_DATE_RE = re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2})$")
 
 _STATUS_PRECEDENCE: dict[ActiveBanStatus, int] = {
     "banned": 1,
@@ -55,6 +55,7 @@ class ParsedBanlistDocument:
     effective_date: str | None = None
     source_url: str | None = None
     source_name: str = "local"
+    upcoming_restrictions: tuple[CardRestrictionRecord, ...] = ()
     upcoming_effective_date: str | None = None
     upcoming_included: bool = False
 
@@ -70,26 +71,15 @@ class BanlistIngestSummary:
     pair_banned_count: int
     effective_date: str | None
     source_name: str
+    upcoming_restrictions_upserted: int = 0
+    upcoming_banned_count: int = 0
+    upcoming_restricted_count: int = 0
+    upcoming_pair_banned_count: int = 0
+    upcoming_effective_date: str | None = None
 
 
 def _normalize_date(raw: str | None) -> str | None:
-    if not raw:
-        return None
-    cleaned = " ".join(raw.strip().split())
-    if not cleaned:
-        return None
-    if _ISO_DATE_RE.match(cleaned):
-        return cleaned
-    slash_match = _SLASH_DATE_RE.match(cleaned)
-    if slash_match:
-        year, month, day = (int(slash_match.group(i)) for i in (1, 2, 3))
-        return f"{year:04d}-{month:02d}-{day:02d}"
-    for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
-        try:
-            return datetime.strptime(cleaned, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    return cleaned
+    return normalize_official_date(raw)
 
 
 def _extract_card_ids(text: str) -> list[str]:
@@ -273,6 +263,17 @@ class _BandaiBanlistHTMLParser(HTMLParser):
                     self._pair_side_a.extend(cards)
                 elif self._pair_side == "b":
                     self._pair_side_b.extend(cards)
+            elif (
+                self._current_bucket is not None
+                and self._section_kind == "upcoming"
+                and not self._in_ul
+                and self._subsection in ("banned", "restricted")
+            ):
+                cards = _extract_card_ids(p_text)
+                if self._subsection == "banned":
+                    self._current_bucket.banned.extend(cards)
+                else:
+                    self._current_bucket.restricted.extend(cards)
             return
 
         if lower == "a" and self._in_anchor:
@@ -443,6 +444,7 @@ def _finalize_entries(
     *,
     default_effective_date: str | None,
     default_source_url: str | None,
+    scope: RestrictionScope = "active",
 ) -> tuple[CardRestrictionRecord, ...]:
     records: list[CardRestrictionRecord] = []
     for card_id in sorted(entries):
@@ -458,6 +460,7 @@ def _finalize_entries(
                 restriction_note=note,
                 effective_date=item.effective_date or default_effective_date,
                 source_url=item.source_url or default_source_url,
+                scope=scope,
             )
         )
     return tuple(records)
@@ -511,14 +514,15 @@ def parse_banlist_html(
     *,
     effective_date: str | None = None,
     source_url: str | None = OFFICIAL_BANLIST_URL,
-    include_upcoming: bool = False,
+    include_upcoming: bool = True,
     source_name: str = "bandai_official_html",
 ) -> ParsedBanlistDocument:
     """Parse Bandai's official restriction HTML page into canonical CardRestrictionRecords.
 
-    By default, ingests only the ``Cards with Active Restrictions`` section so
-    upcoming announcements do not prematurely mark currently legal cards.
-    Set ``include_upcoming=True`` to also include scheduled future-effective changes.
+    Active restrictions from ``Cards with Active Restrictions`` are stored in
+    ``restrictions`` (``scope='active'``), while scheduled future announcements are
+    stored separately in ``upcoming_restrictions`` (``scope='upcoming'``) when
+    ``include_upcoming=True`` (the default).
     """
     parser = _BandaiBanlistHTMLParser()
     parser.feed(html)
@@ -538,94 +542,76 @@ def parse_banlist_html(
         else:
             active_effective = parser.page_date
 
-    entries: dict[str, _MutableRestriction] = {}
+    active_entries: dict[str, _MutableRestriction] = {}
+    upcoming_entries: dict[str, _MutableRestriction] = {}
     upcoming_applied = False
 
     if parser.has_active_section:
         _apply_bucket(
-            entries,
+            active_entries,
             parser.active_bucket,
             effective_date=active_effective,
             source_url=source_url,
         )
         if include_upcoming and parser.upcoming_buckets:
-            upcoming_applied = True
             for bucket in parser.upcoming_buckets:
                 _apply_bucket(
-                    entries,
+                    upcoming_entries,
                     bucket,
-                    effective_date=bucket.effective_date or active_effective,
+                    effective_date=bucket.effective_date or upcoming_date or active_effective,
                     source_url=source_url,
                 )
+            upcoming_applied = bool(upcoming_entries)
     elif parser.upcoming_buckets:
         # Standalone dated announcement page without a separate active list section.
         for bucket in parser.upcoming_buckets:
             _apply_bucket(
-                entries,
+                active_entries,
                 bucket,
                 effective_date=bucket.effective_date or active_effective,
                 source_url=source_url,
             )
 
-    doc_effective = (
-        _normalize_date(effective_date)
-        or (upcoming_date if upcoming_applied and upcoming_date else active_effective)
-    )
+    doc_effective = _normalize_date(effective_date) or active_effective
     records = _finalize_entries(
-        entries,
-        default_effective_date=active_effective,
+        active_entries,
+        default_effective_date=doc_effective,
         default_source_url=source_url,
+        scope="active",
+    )
+    upcoming_records = (
+        _finalize_entries(
+            upcoming_entries,
+            default_effective_date=upcoming_date or doc_effective,
+            default_source_url=source_url,
+            scope="upcoming",
+        )
+        if upcoming_applied
+        else ()
     )
     return ParsedBanlistDocument(
         restrictions=records,
         effective_date=doc_effective,
         source_url=source_url,
         source_name=source_name,
+        upcoming_restrictions=upcoming_records,
         upcoming_effective_date=upcoming_date,
         upcoming_included=upcoming_applied,
     )
 
 
-def parse_banlist_json(
-    raw_json: str | dict[str, Any] | list[dict[str, Any]],
+def _populate_json_entries(
+    raw_entries: list[Any],
+    raw_pairs: list[Any],
     *,
-    effective_date: str | None = None,
-    source_url: str | None = None,
-    source_name: str = "local_json",
-) -> tuple[ParsedBanlistDocument, set[str]]:
-    """Parse a manual local banlist JSON payload.
-
-    Returns ``(ParsedBanlistDocument, explicitly_legal_card_ids)`` so directory overlays
-    can explicitly mark a previously restricted card as ``"legal"``.
-    """
-    payload = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
-
-    doc_effective = _normalize_date(effective_date)
-    doc_source_url = source_url
-    raw_entries: list[Any] = []
-    raw_pairs: list[Any] = []
-
-    if isinstance(payload, dict):
-        if doc_effective is None and isinstance(payload.get("effective_date"), str):
-            doc_effective = _normalize_date(payload["effective_date"])
-        if doc_source_url is None and isinstance(payload.get("source_url"), str):
-            doc_source_url = payload["source_url"].strip() or None
-        restrictions_val = payload.get("restrictions", [])
-        if not isinstance(restrictions_val, list):
-            raise ValueError("Banlist JSON 'restrictions' must be a list")
-        raw_entries = restrictions_val
-        pairs_val = payload.get("banned_pairs", [])
-        if not isinstance(pairs_val, list):
-            raise ValueError("Banlist JSON 'banned_pairs' must be a list")
-        raw_pairs = pairs_val
-    elif isinstance(payload, list):
-        raw_entries = payload
-    else:
-        raise ValueError("Banlist JSON root must be an object or a list of restriction objects")
-
-    entries: dict[str, _MutableRestriction] = {}
-    explicitly_legal: set[str] = set()
-
+    active_entries: dict[str, _MutableRestriction],
+    upcoming_entries: dict[str, _MutableRestriction],
+    explicitly_legal: set[str],
+    default_scope: RestrictionScope,
+    default_effective_date: str | None,
+    default_upcoming_effective_date: str | None,
+    default_source_url: str | None,
+) -> None:
     for idx, item in enumerate(raw_entries):
         if not isinstance(item, dict):
             raise ValueError(f"Banlist restriction at index {idx} must be a JSON object")
@@ -634,12 +620,33 @@ def parse_banlist_json(
             raise ValueError(f"Banlist restriction at index {idx} is missing 'card_id'")
         canonical_id = parse_card_id(raw_cid)[0]
 
+        raw_scope = item.get("scope")
+        if raw_scope is None:
+            entry_scope: RestrictionScope = default_scope
+        elif isinstance(raw_scope, str) and raw_scope.strip().lower() in ("active", "upcoming"):
+            entry_scope = (
+                "upcoming" if raw_scope.strip().lower() == "upcoming" else "active"
+            )
+        else:
+            raise ValueError(
+                f"Banlist restriction for {canonical_id} has invalid scope {raw_scope!r}; "
+                "expected 'active' or 'upcoming'"
+            )
+
+        target_entries = upcoming_entries if entry_scope == "upcoming" else active_entries
+        scope_default_date = (
+            default_upcoming_effective_date
+            if entry_scope == "upcoming"
+            else default_effective_date
+        )
+
         raw_status = item.get("ban_status") or item.get("status")
         if not isinstance(raw_status, str) or not raw_status.strip():
             raise ValueError(f"Banlist restriction for {canonical_id} is missing 'ban_status'")
         status = normalize_ban_status(raw_status)
         if status == "legal":
-            explicitly_legal.add(canonical_id)
+            if entry_scope == "active":
+                explicitly_legal.add(canonical_id)
             continue
 
         raw_max = item.get("max_copies")
@@ -682,16 +689,16 @@ def parse_banlist_json(
         item_eff = (
             _normalize_date(item["effective_date"])
             if isinstance(item.get("effective_date"), str)
-            else doc_effective
+            else scope_default_date
         )
         item_url = (
             item["source_url"].strip()
             if isinstance(item.get("source_url"), str) and item["source_url"].strip()
-            else doc_source_url
+            else default_source_url
         )
 
         _merge_entry(
-            entries,
+            target_entries,
             card_id=canonical_id,
             ban_status=status,
             max_copies=max_copies,
@@ -703,7 +710,7 @@ def parse_banlist_json(
         # Ensure pair_banned relationships are symmetric across both partner cards.
         for partner_id in paired_ids:
             _merge_entry(
-                entries,
+                target_entries,
                 card_id=partner_id,
                 ban_status="pair_banned",
                 paired_card_ids=(canonical_id,),
@@ -711,6 +718,12 @@ def parse_banlist_json(
                 source_url=item_url,
             )
 
+    target_for_pairs = upcoming_entries if default_scope == "upcoming" else active_entries
+    pair_eff_date = (
+        default_upcoming_effective_date
+        if default_scope == "upcoming"
+        else default_effective_date
+    )
     for idx, pair in enumerate(raw_pairs):
         if (
             not isinstance(pair, list)
@@ -723,33 +736,134 @@ def parse_banlist_json(
         if card_a == card_b:
             raise ValueError(f"Card {card_a} cannot be pair_banned with itself")
         _merge_entry(
-            entries,
+            target_for_pairs,
             card_id=card_a,
             ban_status="pair_banned",
             paired_card_ids=(card_b,),
-            effective_date=doc_effective,
-            source_url=doc_source_url,
+            effective_date=pair_eff_date,
+            source_url=default_source_url,
         )
         _merge_entry(
-            entries,
+            target_for_pairs,
             card_id=card_b,
             ban_status="pair_banned",
             paired_card_ids=(card_a,),
-            effective_date=doc_effective,
-            source_url=doc_source_url,
+            effective_date=pair_eff_date,
+            source_url=default_source_url,
         )
 
-    records = _finalize_entries(
-        entries,
+
+def parse_banlist_json(
+    raw_json: str | dict[str, Any] | list[dict[str, Any]],
+    *,
+    effective_date: str | None = None,
+    source_url: str | None = None,
+    include_upcoming: bool = True,
+    source_name: str = "local_json",
+) -> tuple[ParsedBanlistDocument, set[str]]:
+    """Parse a manual local banlist JSON payload.
+
+    Returns ``(ParsedBanlistDocument, explicitly_legal_card_ids)`` so directory overlays
+    can explicitly mark a previously restricted card as ``"legal"``.
+    """
+    payload = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+
+    doc_effective = _normalize_date(effective_date)
+    doc_upcoming_effective: str | None = None
+    doc_source_url = source_url
+    raw_entries: list[Any] = []
+    raw_pairs: list[Any] = []
+    raw_upcoming_entries: list[Any] = []
+    raw_upcoming_pairs: list[Any] = []
+
+    if isinstance(payload, dict):
+        if doc_effective is None and isinstance(payload.get("effective_date"), str):
+            doc_effective = _normalize_date(payload["effective_date"])
+        if isinstance(payload.get("upcoming_effective_date"), str):
+            doc_upcoming_effective = _normalize_date(payload["upcoming_effective_date"])
+        if doc_source_url is None and isinstance(payload.get("source_url"), str):
+            doc_source_url = payload["source_url"].strip() or None
+        restrictions_val = payload.get("restrictions", [])
+        if not isinstance(restrictions_val, list):
+            raise ValueError("Banlist JSON 'restrictions' must be a list")
+        raw_entries = restrictions_val
+        pairs_val = payload.get("banned_pairs", [])
+        if not isinstance(pairs_val, list):
+            raise ValueError("Banlist JSON 'banned_pairs' must be a list")
+        raw_pairs = pairs_val
+
+        upcoming_val = payload.get("upcoming_restrictions", [])
+        if not isinstance(upcoming_val, list):
+            raise ValueError("Banlist JSON 'upcoming_restrictions' must be a list")
+        raw_upcoming_entries = upcoming_val
+
+        upcoming_pairs_val = payload.get("upcoming_banned_pairs", [])
+        if not isinstance(upcoming_pairs_val, list):
+            raise ValueError("Banlist JSON 'upcoming_banned_pairs' must be a list")
+        raw_upcoming_pairs = upcoming_pairs_val
+    elif isinstance(payload, list):
+        raw_entries = payload
+    else:
+        raise ValueError("Banlist JSON root must be an object or a list of restriction objects")
+
+    active_entries: dict[str, _MutableRestriction] = {}
+    upcoming_entries: dict[str, _MutableRestriction] = {}
+    explicitly_legal: set[str] = set()
+
+    _populate_json_entries(
+        raw_entries,
+        raw_pairs,
+        active_entries=active_entries,
+        upcoming_entries=upcoming_entries,
+        explicitly_legal=explicitly_legal,
+        default_scope="active",
         default_effective_date=doc_effective,
+        default_upcoming_effective_date=doc_upcoming_effective,
         default_source_url=doc_source_url,
     )
+    _populate_json_entries(
+        raw_upcoming_entries,
+        raw_upcoming_pairs,
+        active_entries=active_entries,
+        upcoming_entries=upcoming_entries,
+        explicitly_legal=explicitly_legal,
+        default_scope="upcoming",
+        default_effective_date=doc_effective,
+        default_upcoming_effective_date=doc_upcoming_effective,
+        default_source_url=doc_source_url,
+    )
+
+    records = _finalize_entries(
+        active_entries,
+        default_effective_date=doc_effective,
+        default_source_url=doc_source_url,
+        scope="active",
+    )
+    upcoming_records = (
+        _finalize_entries(
+            upcoming_entries,
+            default_effective_date=doc_upcoming_effective,
+            default_source_url=doc_source_url,
+            scope="upcoming",
+        )
+        if include_upcoming and upcoming_entries
+        else ()
+    )
+    if doc_upcoming_effective is None and upcoming_records:
+        doc_upcoming_effective = next(
+            (r.effective_date for r in upcoming_records if r.effective_date),
+            None,
+        )
+
     return (
         ParsedBanlistDocument(
             restrictions=records,
             effective_date=doc_effective,
             source_url=doc_source_url,
             source_name=source_name,
+            upcoming_restrictions=upcoming_records,
+            upcoming_effective_date=doc_upcoming_effective,
+            upcoming_included=bool(upcoming_records),
         ),
         explicitly_legal,
     )
@@ -760,7 +874,7 @@ def parse_banlist_path(
     *,
     effective_date: str | None = None,
     source_url: str | None = None,
-    include_upcoming: bool = False,
+    include_upcoming: bool = True,
 ) -> ParsedBanlistDocument:
     """Parse a banlist HTML file, manual JSON file, or directory under ``data/raw/banlist/``."""
     target = Path(path)
@@ -786,6 +900,7 @@ def parse_banlist_path(
                 target.read_text(encoding="utf-8"),
                 effective_date=effective_date,
                 source_url=source_url,
+                include_upcoming=include_upcoming,
                 source_name=target.name,
             )
             return doc
@@ -807,6 +922,7 @@ def parse_banlist_path(
         )
 
     merged: dict[str, CardRestrictionRecord] = {}
+    merged_upcoming: dict[str, CardRestrictionRecord] = {}
     resolved_effective: str | None = _normalize_date(effective_date)
     resolved_url: str | None = source_url
     upcoming_date: str | None = None
@@ -824,6 +940,8 @@ def parse_banlist_path(
         sources_used.append(html_path.name)
         for rec in doc.restrictions:
             merged[rec.card_id] = rec
+        for rec in doc.upcoming_restrictions:
+            merged_upcoming[rec.card_id] = rec
         if resolved_effective is None and doc.effective_date:
             resolved_effective = doc.effective_date
         if resolved_url is None and doc.source_url:
@@ -837,6 +955,7 @@ def parse_banlist_path(
             json_path.read_text(encoding="utf-8"),
             effective_date=effective_date,
             source_url=source_url,
+            include_upcoming=include_upcoming,
             source_name=json_path.name,
         )
         sources_used.append(json_path.name)
@@ -858,22 +977,34 @@ def parse_banlist_path(
                             ),
                             effective_date=existing.effective_date,
                             source_url=existing.source_url,
+                            scope="active",
                         )
         for rec in doc.restrictions:
             merged[rec.card_id] = rec
+        for rec in doc.upcoming_restrictions:
+            merged_upcoming[rec.card_id] = rec
         if effective_date is None and doc.effective_date:
             resolved_effective = doc.effective_date
         if source_url is None and doc.source_url:
             resolved_url = doc.source_url
+        if doc.upcoming_effective_date:
+            upcoming_date = doc.upcoming_effective_date
+        upcoming_included = upcoming_included or doc.upcoming_included
 
     ordered_records = tuple(merged[cid] for cid in sorted(merged))
+    ordered_upcoming = (
+        tuple(merged_upcoming[cid] for cid in sorted(merged_upcoming))
+        if include_upcoming
+        else ()
+    )
     return ParsedBanlistDocument(
         restrictions=ordered_records,
         effective_date=resolved_effective,
         source_url=resolved_url,
         source_name=",".join(sources_used),
+        upcoming_restrictions=ordered_upcoming,
         upcoming_effective_date=upcoming_date,
-        upcoming_included=upcoming_included,
+        upcoming_included=bool(ordered_upcoming),
     )
 
 
@@ -881,29 +1012,52 @@ def ingest_banlist(
     conn: sqlite3.Connection,
     doc: ParsedBanlistDocument,
 ) -> BanlistIngestSummary:
-    """Idempotently replace active card restrictions in SQLite without touching chunks_vec."""
-    existing_ids = {
-        str(row[0])
-        for row in conn.execute("SELECT card_id FROM card_restrictions").fetchall()
+    """Idempotently replace active and upcoming card restrictions without touching chunks_vec."""
+    cr_cols = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(card_restrictions)").fetchall()
     }
-    incoming_ids = {rec.card_id for rec in doc.restrictions}
-    stale_ids = sorted(existing_ids - incoming_ids)
+    if "scope" not in cr_cols:
+        with conn:
+            migrate_schema(conn)
+
+    existing_keys = {
+        (str(row[0]), str(row[1]))
+        for row in conn.execute("SELECT card_id, scope FROM card_restrictions").fetchall()
+    }
+    active_records = tuple(
+        rec if rec.scope == "active" else replace(rec, scope="active")
+        for rec in doc.restrictions
+    )
+    upcoming_records = tuple(
+        rec if rec.scope == "upcoming" else replace(rec, scope="upcoming")
+        for rec in doc.upcoming_restrictions
+    )
+    all_incoming = (*active_records, *upcoming_records)
+    incoming_keys = {(rec.card_id, rec.scope) for rec in all_incoming}
+    stale_keys = sorted(existing_keys - incoming_keys)
+
+    resolved_upcoming_date = doc.upcoming_effective_date
+    if resolved_upcoming_date is None and upcoming_records:
+        resolved_upcoming_date = next(
+            (r.effective_date for r in upcoming_records if r.effective_date),
+            None,
+        )
 
     with conn:
-        if stale_ids:
+        if stale_keys:
             conn.executemany(
-                "DELETE FROM card_restrictions WHERE card_id = ?",
-                [(cid,) for cid in stale_ids],
+                "DELETE FROM card_restrictions WHERE card_id = ? AND scope = ?",
+                stale_keys,
             )
 
-        if doc.restrictions:
+        if all_incoming:
             conn.executemany(
                 """
                 INSERT INTO card_restrictions (
-                    card_id, ban_status, max_copies, paired_card_ids,
+                    card_id, scope, ban_status, max_copies, paired_card_ids,
                     restriction_note, effective_date, source_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(card_id) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(card_id, scope) DO UPDATE SET
                     ban_status = excluded.ban_status,
                     max_copies = excluded.max_copies,
                     paired_card_ids = excluded.paired_card_ids,
@@ -914,6 +1068,7 @@ def ingest_banlist(
                 [
                     (
                         rec.card_id,
+                        rec.scope,
                         rec.ban_status,
                         rec.max_copies,
                         json.dumps(list(rec.paired_card_ids), ensure_ascii=False),
@@ -921,7 +1076,7 @@ def ingest_banlist(
                         rec.effective_date,
                         rec.source_url,
                     )
-                    for rec in doc.restrictions
+                    for rec in all_incoming
                 ],
             )
 
@@ -930,20 +1085,39 @@ def ingest_banlist(
             set_meta(conn, "banlist_effective_date", doc.effective_date)
         else:
             conn.execute("DELETE FROM meta WHERE key = 'banlist_effective_date'")
+
+        if upcoming_records and resolved_upcoming_date:
+            set_meta(conn, "banlist_upcoming_effective_date", resolved_upcoming_date)
+        else:
+            conn.execute("DELETE FROM meta WHERE key = 'banlist_upcoming_effective_date'")
+
         set_meta(conn, "banlist_source", doc.source_name)
         set_meta(conn, "banlist_last_ingested_at", now)
         set_meta(conn, "last_ingested_at", now)
 
-    banned_count = sum(1 for r in doc.restrictions if r.ban_status == "banned")
-    restricted_count = sum(1 for r in doc.restrictions if r.ban_status == "restricted")
-    pair_banned_count = sum(1 for r in doc.restrictions if r.ban_status == "pair_banned")
+    banned_count = sum(1 for r in active_records if r.ban_status == "banned")
+    restricted_count = sum(1 for r in active_records if r.ban_status == "restricted")
+    pair_banned_count = sum(1 for r in active_records if r.ban_status == "pair_banned")
+
+    upcoming_banned_count = sum(1 for r in upcoming_records if r.ban_status == "banned")
+    upcoming_restricted_count = sum(
+        1 for r in upcoming_records if r.ban_status == "restricted"
+    )
+    upcoming_pair_banned_count = sum(
+        1 for r in upcoming_records if r.ban_status == "pair_banned"
+    )
 
     return BanlistIngestSummary(
-        restrictions_upserted=len(doc.restrictions),
-        restrictions_removed=len(stale_ids),
+        restrictions_upserted=len(active_records),
+        restrictions_removed=len(stale_keys),
         banned_count=banned_count,
         restricted_count=restricted_count,
         pair_banned_count=pair_banned_count,
         effective_date=doc.effective_date,
         source_name=doc.source_name,
+        upcoming_restrictions_upserted=len(upcoming_records),
+        upcoming_banned_count=upcoming_banned_count,
+        upcoming_restricted_count=upcoming_restricted_count,
+        upcoming_pair_banned_count=upcoming_pair_banned_count,
+        upcoming_effective_date=resolved_upcoming_date if upcoming_records else None,
     )

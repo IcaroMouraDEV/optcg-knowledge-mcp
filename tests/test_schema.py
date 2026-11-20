@@ -427,3 +427,120 @@ def test_migrate_v3_to_v4_adds_card_restrictions_without_touching_vectors(tmp_pa
 
         with conn:
             assert migrate_schema(conn) is False
+
+
+def test_migrate_v4_to_v5_adds_scope_and_composite_pk_without_touching_vectors(tmp_path) -> None:
+    db_path = tmp_path / "legacy_v4.db"
+    embedder = HashEmbedder(dimension=64)
+
+    with connect(db_path) as conn:
+        init_schema(conn, embedding_dim=64, embedding_model=embedder.model_name)
+        with conn:
+            # Replace card_restrictions with the schema v4 single-column PK table.
+            conn.execute("DROP TABLE card_restrictions")
+            conn.execute(
+                """
+                CREATE TABLE card_restrictions (
+                    card_id TEXT PRIMARY KEY,
+                    ban_status TEXT NOT NULL CHECK (
+                        ban_status IN ('banned', 'restricted', 'pair_banned')
+                    ),
+                    max_copies INTEGER NOT NULL CHECK (max_copies IN (0, 1, 4)),
+                    paired_card_ids TEXT NOT NULL DEFAULT '[]',
+                    restriction_note TEXT,
+                    effective_date TEXT,
+                    source_url TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO card_restrictions (
+                    card_id, ban_status, max_copies, paired_card_ids,
+                    restriction_note, effective_date, source_url
+                )
+                VALUES (
+                    'OP05-119', 'restricted', 1, '[]',
+                    'Limited to 1 copy per deck.', '2026-10-12',
+                    'https://en.onepiece-cardgame.com/rules/restriction/'
+                )
+                """
+            )
+            conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+
+            text = "OP05-119 Monkey.D.Luffy extra turn."
+            upsert_chunks(
+                conn,
+                [
+                    ChunkRecord(
+                        chunk_id="card:OP05-119",
+                        doc_type="card",
+                        doc_id="OP05-119",
+                        text=text,
+                        authority=1,
+                        metadata={"card_id": "OP05-119"},
+                        content_hash=compute_content_hash(text),
+                    )
+                ],
+            )
+            row = conn.execute(
+                "SELECT rowid, text FROM chunks WHERE chunk_id = 'card:OP05-119'"
+            ).fetchone()
+            vec = embedder.embed([str(row["text"])])[0]
+            conn.execute(
+                "INSERT INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
+                (row["rowid"], serialize_vector(vec)),
+            )
+
+        # Calling init_schema (as open_db(init=True) does in CLI commands) on a v4 DB
+        # must migrate card_restrictions before running BASE_SCHEMA_SQL indexes.
+        init_schema(conn, embedding_dim=64, embedding_model=embedder.model_name)
+        assert get_meta(conn, "schema_version") == "5"
+
+        # Existing v4 row is preserved with scope='active', and the same card_id can
+        # now also hold a separate scope='upcoming' row.
+        active_row = conn.execute(
+            "SELECT scope, ban_status, max_copies FROM card_restrictions WHERE card_id = 'OP05-119'"
+        ).fetchone()
+        assert active_row is not None
+        assert active_row["scope"] == "active"
+        assert active_row["ban_status"] == "restricted"
+        assert active_row["max_copies"] == 1
+
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO card_restrictions (
+                    card_id, scope, ban_status, max_copies, paired_card_ids, effective_date
+                )
+                VALUES ('OP05-119', 'upcoming', 'banned', 0, '[]', '2026-11-27')
+                """
+            )
+        rows = conn.execute(
+            """
+            SELECT scope, ban_status, max_copies
+            FROM card_restrictions
+            WHERE card_id = 'OP05-119'
+            ORDER BY scope ASC
+            """
+        ).fetchall()
+        assert [(r["scope"], r["ban_status"], r["max_copies"]) for r in rows] == [
+            ("active", "restricted", 1),
+            ("upcoming", "banned", 0),
+        ]
+
+        # Existing chunks_vec embeddings remain untouched.
+        qvec = serialize_vector(embedder.embed_query("Monkey.D.Luffy extra turn"))
+        knn = conn.execute(
+            """
+            SELECT c.chunk_id
+            FROM chunks_vec v
+            JOIN chunks c ON c.rowid = v.rowid
+            WHERE v.embedding MATCH ? AND k = 1
+            """,
+            (qvec,),
+        ).fetchall()
+        assert [r["chunk_id"] for r in knn] == ["card:OP05-119"]
+
+        with conn:
+            assert migrate_schema(conn) is False

@@ -216,6 +216,7 @@ def test_mcp_banlist_legality_in_get_card_and_search_cards_zero_stdout_leak(
     doc, _ = parse_banlist_json(
         {
             "effective_date": "2026-10-12",
+            "upcoming_effective_date": "2026-11-27",
             "restrictions": [
                 {"card_id": "OP01-001", "ban_status": "banned"},
                 {"card_id": "OP04-083", "ban_status": "restricted"},
@@ -225,6 +226,7 @@ def test_mcp_banlist_legality_in_get_card_and_search_cards_zero_stdout_leak(
                     "paired_card_ids": ["P-001"],
                 },
             ],
+            "upcoming_banned_pairs": [["OP02-106", "ST10-001"]],
         }
     )
     ingest_banlist(conn, doc)
@@ -237,6 +239,9 @@ def test_mcp_banlist_legality_in_get_card_and_search_cards_zero_stdout_leak(
         zoro = _extract_json_payload(await server.call_tool("get_card", {"id_or_name": "OP01-001"}))
         luffy = _extract_json_payload(
             await server.call_tool("get_card", {"id_or_name": "OP05-119"})
+        )
+        tsuru = _extract_json_payload(
+            await server.call_tool("get_card", {"id_or_name": "OP02-106"})
         )
         full_banlist = _extract_json_payload(await server.call_tool("get_banlist", {}))
         filtered_banlist = _extract_json_payload(
@@ -251,14 +256,19 @@ def test_mcp_banlist_legality_in_get_card_and_search_cards_zero_stdout_leak(
         restricted_list = _extract_json_payload(
             await server.call_tool("search_cards", {"ban_status": "restricted"})
         )
+        legal_list = _extract_json_payload(
+            await server.call_tool("search_cards", {"ban_status": "legal"})
+        )
         return {
             "zoro": zoro,
             "luffy": luffy,
+            "tsuru": tsuru,
             "full_banlist": full_banlist,
             "filtered_banlist": filtered_banlist,
             "banned_list": banned_list,
             "pair_list": pair_list,
             "restricted_list": restricted_list,
+            "legal_list": legal_list,
         }
 
     res = asyncio.run(_run())
@@ -266,15 +276,25 @@ def test_mcp_banlist_legality_in_get_card_and_search_cards_zero_stdout_leak(
 
     assert res["zoro"]["banlist_loaded"] is True
     assert res["zoro"]["banlist_effective_date"] == "2026-10-12"
+    assert res["zoro"]["banlist_upcoming_effective_date"] == "2026-11-27"
     assert res["zoro"]["cards"][0]["ban_status"] == "banned"
     assert res["zoro"]["cards"][0]["max_copies"] == 0
     assert res["zoro"]["cards"][0]["effective_date"] == "2026-10-12"
+    assert res["zoro"]["cards"][0]["upcoming_restriction"] is None
 
     assert res["luffy"]["cards"][0]["ban_status"] == "pair_banned"
     assert res["luffy"]["cards"][0]["paired_card_ids"] == ["P-001"]
 
+    # OP02-106 is currently legal today, with a scheduled upcoming pair ban.
+    assert res["tsuru"]["cards"][0]["ban_status"] == "legal"
+    assert res["tsuru"]["cards"][0]["max_copies"] == 4
+    assert res["tsuru"]["cards"][0]["upcoming_restriction"]["ban_status"] == "pair_banned"
+    assert res["tsuru"]["cards"][0]["upcoming_restriction"]["paired_card_ids"] == ["ST10-001"]
+    assert res["tsuru"]["cards"][0]["upcoming_restriction"]["effective_date"] == "2026-11-27"
+
     assert res["full_banlist"]["banlist_loaded"] is True
     assert res["full_banlist"]["banlist_effective_date"] == "2026-10-12"
+    assert res["full_banlist"]["banlist_upcoming_effective_date"] == "2026-11-27"
     assert res["full_banlist"]["counts"] == {
         "banned": 1,
         "restricted": 1,
@@ -282,15 +302,33 @@ def test_mcp_banlist_legality_in_get_card_and_search_cards_zero_stdout_leak(
         "total": 4,
     }
     assert res["full_banlist"]["banned_pairs"] == [["OP05-119", "P-001"]]
+    assert res["full_banlist"]["upcoming"]["effective_date"] == "2026-11-27"
+    assert res["full_banlist"]["upcoming"]["counts"] == {
+        "banned": 0,
+        "restricted": 0,
+        "pair_banned": 2,
+        "total": 2,
+    }
+    assert res["full_banlist"]["upcoming"]["banned_pairs"] == [["OP02-106", "ST10-001"]]
+
     assert [r["card_id"] for r in res["filtered_banlist"]["restrictions"]] == [
         "OP05-119",
         "P-001",
+    ]
+    assert [r["card_id"] for r in res["filtered_banlist"]["upcoming"]["restrictions"]] == [
+        "OP02-106",
+        "ST10-001",
     ]
 
     assert [c["card_id"] for c in res["banned_list"]["cards"]] == ["OP01-001"]
     assert res["banned_list"]["filters"]["ban_status"] == "banned"
     assert [c["card_id"] for c in res["restricted_list"]["cards"]] == ["OP04-083"]
     assert [c["card_id"] for c in res["pair_list"]["cards"]] == ["OP05-119", "P-001"]
+    assert [c["card_id"] for c in res["legal_list"]["cards"]] == [
+        "OP02-106",
+        "ST01-014",
+        "ST10-001",
+    ]
 
 
 def test_mcp_trm_tool_and_search_filtering_zero_stdout_leak(
@@ -413,10 +451,11 @@ def test_mcp_get_status_contract_and_zero_stdout_leak(
     status = asyncio.run(_run())
     assert capsys.readouterr().out == ""
 
-    assert status["schema_version"] == "4"
+    assert status["schema_version"] == "5"
     assert status["rules_version"] == "1.24"
     assert status["banlist_loaded"] is True
     assert status["banlist_effective_date"] == "2026-10-12"
+    assert status["banlist_upcoming_effective_date"] is None
     assert status["embedding_model"] == embedder.model_name
     assert status["embedding_dim"] == embedder.dimension
 
@@ -427,6 +466,12 @@ def test_mcp_get_status_contract_and_zero_stdout_leak(
         "banned": 1,
         "restricted": 0,
         "pair_banned": 0,
+        "upcoming": {
+            "total": 0,
+            "banned": 0,
+            "restricted": 0,
+            "pair_banned": 0,
+        },
     }
     assert status["counts"]["rulings"]["total"] == 5
     assert status["counts"]["rulings"]["superseded"] == 1

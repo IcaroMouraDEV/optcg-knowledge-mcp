@@ -51,8 +51,11 @@ Follow these mandatory rules for every ruling question:
    - If any mentioned card has `ban_status != "legal"` (`banned`, `restricted`, or
      `pair_banned`), flag its official restriction status prominently (including `max_copies`,
      `paired_card_ids` for `pair_banned` cards, `restriction_note`, and `effective_date`) even
-     when answering a mechanical interaction question. If `banlist_loaded` is `false` and deck
-     legality is relevant, warn the user that official banlist data has not been ingested yet.
+     when answering a mechanical interaction question. If a card has a non-null
+     `upcoming_restriction` (or appears under `get_banlist()["upcoming"]`), also inform the user
+     of the scheduled future restriction and its `effective_date` without treating it as already
+     active today. If `banlist_loaded` is `false` and deck legality is relevant, warn the user
+     that official banlist data has not been ingested yet.
    - If two sources conflict (e.g., an older judge ruling vs. a newer Comprehensive Rule or
      Official FAQ), state the conflict explicitly, cite both sources, and explain which prevails
      under the authority hierarchy.

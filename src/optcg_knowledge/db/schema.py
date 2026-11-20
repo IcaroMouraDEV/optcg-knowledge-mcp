@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 TRM_SECTIONS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS trm_sections (
@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS trm_sections (
 
 CARD_RESTRICTIONS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS card_restrictions (
-    card_id TEXT PRIMARY KEY,
+    card_id TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'active' CHECK (scope IN ('active', 'upcoming')),
     ban_status TEXT NOT NULL CHECK (
         ban_status IN ('banned', 'restricted', 'pair_banned')
     ),
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS card_restrictions (
     paired_card_ids TEXT NOT NULL DEFAULT '[]',
     restriction_note TEXT,
     effective_date TEXT,
-    source_url TEXT
+    source_url TEXT,
+    PRIMARY KEY (card_id, scope)
 )
 """
 
@@ -83,7 +85,8 @@ CREATE INDEX IF NOT EXISTS idx_cards_set_code ON cards(set_code);
 CREATE INDEX IF NOT EXISTS idx_cards_category ON cards(category);
 
 CREATE TABLE IF NOT EXISTS card_restrictions (
-    card_id TEXT PRIMARY KEY,
+    card_id TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'active' CHECK (scope IN ('active', 'upcoming')),
     ban_status TEXT NOT NULL CHECK (
         ban_status IN ('banned', 'restricted', 'pair_banned')
     ),
@@ -91,10 +94,13 @@ CREATE TABLE IF NOT EXISTS card_restrictions (
     paired_card_ids TEXT NOT NULL DEFAULT '[]',
     restriction_note TEXT,
     effective_date TEXT,
-    source_url TEXT
+    source_url TEXT,
+    PRIMARY KEY (card_id, scope)
 );
 
 CREATE INDEX IF NOT EXISTS idx_card_restrictions_status ON card_restrictions(ban_status);
+CREATE INDEX IF NOT EXISTS idx_card_restrictions_scope_status
+    ON card_restrictions(scope, ban_status);
 
 CREATE TABLE IF NOT EXISTS rulings (
     ruling_id TEXT PRIMARY KEY,
@@ -291,7 +297,69 @@ def migrate_schema(conn: sqlite3.Connection) -> bool:
             ON card_restrictions(ban_status)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_card_restrictions_scope_status
+            ON card_restrictions(scope, ban_status)
+            """
+        )
         migrated = True
+    else:
+        cr_columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(card_restrictions)").fetchall()
+        }
+        if "scope" not in cr_columns:
+            conn.execute("DROP INDEX IF EXISTS idx_card_restrictions_status")
+            conn.execute("DROP INDEX IF EXISTS idx_card_restrictions_scope_status")
+            conn.execute(
+                """
+                CREATE TABLE card_restrictions_v5_migration (
+                    card_id TEXT NOT NULL,
+                    scope TEXT NOT NULL DEFAULT 'active' CHECK (
+                        scope IN ('active', 'upcoming')
+                    ),
+                    ban_status TEXT NOT NULL CHECK (
+                        ban_status IN ('banned', 'restricted', 'pair_banned')
+                    ),
+                    max_copies INTEGER NOT NULL CHECK (max_copies IN (0, 1, 4)),
+                    paired_card_ids TEXT NOT NULL DEFAULT '[]',
+                    restriction_note TEXT,
+                    effective_date TEXT,
+                    source_url TEXT,
+                    PRIMARY KEY (card_id, scope)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO card_restrictions_v5_migration (
+                    card_id, scope, ban_status, max_copies, paired_card_ids,
+                    restriction_note, effective_date, source_url
+                )
+                SELECT
+                    card_id, 'active', ban_status, max_copies, paired_card_ids,
+                    restriction_note, effective_date, source_url
+                FROM card_restrictions
+                """
+            )
+            conn.execute("DROP TABLE card_restrictions")
+            conn.execute(
+                "ALTER TABLE card_restrictions_v5_migration RENAME TO card_restrictions"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_card_restrictions_status
+                ON card_restrictions(ban_status)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_card_restrictions_scope_status
+                ON card_restrictions(scope, ban_status)
+                """
+            )
+            migrated = True
 
     chunks_sql_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks'"
@@ -382,9 +450,10 @@ def init_schema(
     embedding_model: str = "BAAI/bge-m3",
 ) -> None:
     """Idempotently initialize all SQLite tables, FTS5 triggers, sqlite-vec, and metadata."""
-    conn.executescript(BASE_SCHEMA_SQL)
     with conn:
         migrate_schema(conn)
+    conn.executescript(BASE_SCHEMA_SQL)
+    with conn:
         set_meta(conn, "schema_version", SCHEMA_VERSION)
         ensure_vec_table(
             conn,

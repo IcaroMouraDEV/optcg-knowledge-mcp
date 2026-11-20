@@ -257,8 +257,9 @@ def create_server(
         description=(
             "Look up an OPTCG card by canonical card_id (e.g. 'OP05-119', 'ST10-001', 'P-001') "
             "or by name (exact or fuzzy, ignoring punctuation differences like 'Monkey D Luffy'). "
-            "Returns all matching canonical card printings/versions along with official banlist "
-            "legality (ban_status, max_copies, paired_card_ids, restriction_note, effective_date)."
+            "Returns all matching canonical card printings/versions along with active official "
+            "banlist legality (ban_status, max_copies, paired_card_ids, restriction_note, "
+            "effective_date) and any scheduled upcoming_restriction."
         ),
     )
     def get_card(id_or_name: str) -> dict[str, Any]:
@@ -271,8 +272,9 @@ def create_server(
         description=(
             "Filter canonical OPTCG cards by name substring, color, exact cost, trait substring, "
             "effect/trigger keyword (e.g. '[Blocker]' or 'Rush'), set_code (e.g. 'OP05'), and "
-            "official ban_status ('legal', 'banned', 'restricted', or 'pair_banned'). "
-            "Defaults to returning up to 25 matches (max 100)."
+            "active official ban_status ('legal', 'banned', 'restricted', or 'pair_banned'). "
+            "Defaults to returning up to 25 matches (max 100), including upcoming_restriction "
+            "metadata on each card."
         ),
     )
     def search_cards(
@@ -302,10 +304,11 @@ def create_server(
     @server.tool(
         name="get_banlist",
         description=(
-            "Retrieve the full official Bandai OPTCG banlist / card restrictions in a single call "
-            "(banned, restricted, and pair_banned cards with effective_date, counts, deduplicated "
-            "banned_pairs, and card details when present in the cards table). Optionally filter "
-            "by ban_status ('banned', 'restricted', or 'pair_banned')."
+            "Retrieve the official Bandai OPTCG banlist / card restrictions in a single call, "
+            "separating active restrictions (counts, deduplicated banned_pairs, and restrictions) "
+            "from scheduled future announcements (under the `upcoming` section with its own "
+            "effective_date, counts, banned_pairs, and restrictions). Optionally filter by "
+            "ban_status ('banned', 'restricted', or 'pair_banned')."
         ),
     )
     def get_banlist(ban_status: str | None = None) -> dict[str, Any]:

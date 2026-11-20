@@ -100,7 +100,7 @@ def run_sync(
     cards_base_url: str | None = None,
     cards_packs: Sequence[str] | None = None,
     skip_banlist: bool = False,
-    include_upcoming_banlist: bool = False,
+    include_upcoming_banlist: bool = True,
     skip_faq: bool = False,
     skip_rulings: bool = False,
     rulings_path: Path | None = None,
@@ -305,7 +305,8 @@ def run_sync(
                         f"upserted={banlist_summary.restrictions_upserted} "
                         f"(banned={banlist_summary.banned_count}, "
                         f"restricted={banlist_summary.restricted_count}, "
-                        f"pair_banned={banlist_summary.pair_banned_count}), "
+                        f"pair_banned={banlist_summary.pair_banned_count}, "
+                        f"upcoming={banlist_summary.upcoming_restrictions_upserted}), "
                         f"effective_date={banlist_summary.effective_date or 'unknown'}"
                     ),
                     metrics={
@@ -315,6 +316,10 @@ def run_sync(
                         "restricted_count": banlist_summary.restricted_count,
                         "pair_banned_count": banlist_summary.pair_banned_count,
                         "effective_date": banlist_summary.effective_date,
+                        "upcoming_restrictions_upserted": (
+                            banlist_summary.upcoming_restrictions_upserted
+                        ),
+                        "upcoming_effective_date": banlist_summary.upcoming_effective_date,
                     },
                 )
             )

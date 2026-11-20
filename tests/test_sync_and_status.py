@@ -189,11 +189,12 @@ def _build_mock_official_client(sample_rules_text: str) -> httpx.Client:
 
 def test_get_status_empty_db(db_conn: sqlite3.Connection) -> None:
     status = get_status(db_conn)
-    assert status["schema_version"] == "4"
+    assert status["schema_version"] == "5"
     assert status["rules_version"] is None
     assert status["trm_version"] is None
     assert status["banlist_loaded"] is False
     assert status["banlist_effective_date"] is None
+    assert status["banlist_upcoming_effective_date"] is None
     assert status["embedding_model"] == "test/hash-embedder"
     assert status["embedding_dim"] == 64
 
@@ -205,6 +206,12 @@ def test_get_status_empty_db(db_conn: sqlite3.Connection) -> None:
         "banned": 0,
         "restricted": 0,
         "pair_banned": 0,
+        "upcoming": {
+            "total": 0,
+            "banned": 0,
+            "restricted": 0,
+            "pair_banned": 0,
+        },
     }
     assert status["counts"]["rulings"]["total"] == 0
     assert status["counts"]["rulings"]["unreviewed"] == 0
@@ -228,6 +235,7 @@ def test_get_status_breakdown_by_tier_unreviewed_and_partial_embeddings(
     ban_doc, _ = parse_banlist_json(
         {
             "effective_date": "2026-10-12",
+            "upcoming_effective_date": "2026-11-27",
             "restrictions": [
                 {"card_id": "OP01-001", "ban_status": "banned"},
                 {"card_id": "OP04-083", "ban_status": "restricted"},
@@ -237,6 +245,7 @@ def test_get_status_breakdown_by_tier_unreviewed_and_partial_embeddings(
                     "paired_card_ids": ["P-001"],
                 },
             ],
+            "upcoming_banned_pairs": [["EB05-001", "OP13-001"]],
         }
     )
     ingest_banlist(conn, ban_doc)
@@ -268,12 +277,20 @@ def test_get_status_breakdown_by_tier_unreviewed_and_partial_embeddings(
     mark_ruling(conn, t0["ruling_id"], reviewed=True)
 
     partial = get_status(conn)
+    assert partial["banlist_effective_date"] == "2026-10-12"
+    assert partial["banlist_upcoming_effective_date"] == "2026-11-27"
     assert partial["counts"]["trm_sections"] > 0
     assert partial["counts"]["card_restrictions"] == {
         "total": 4,
         "banned": 1,
         "restricted": 1,
         "pair_banned": 2,
+        "upcoming": {
+            "total": 2,
+            "banned": 0,
+            "restricted": 0,
+            "pair_banned": 2,
+        },
     }
     assert partial["counts"]["rulings"]["by_source"] == {
         "rules": 0,
@@ -355,7 +372,7 @@ def test_run_sync_full_offline_pipeline_and_idempotency(
     assert all(step.status == "completed" for step in first.steps)
 
     snap1 = first.status_snapshot
-    assert snap1["schema_version"] == "4"
+    assert snap1["schema_version"] == "5"
     assert snap1["rules_version"] == "1.24"
     assert snap1["banlist_loaded"] is True
     assert snap1["banlist_effective_date"] == "2026-10-12"
@@ -486,7 +503,7 @@ def test_cli_sync_and_status_offline(
     exit_status_json = cli.main(["--db", str(db_path), "status", "--json"])
     assert exit_status_json == 0
     status_payload = json.loads(capsys.readouterr().out)
-    assert status_payload["schema_version"] == "4"
+    assert status_payload["schema_version"] == "5"
     assert status_payload["rules_version"] == "1.24"
     assert status_payload["counts"]["rules"] > 0
     assert status_payload["counts"]["cards"] > 0

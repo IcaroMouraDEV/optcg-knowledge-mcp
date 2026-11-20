@@ -11,6 +11,7 @@ DocType = Literal["rule", "ruling", "card", "tournament_rule"]
 JudgeTier = Literal["tier_0", "tier_2", "tier_1"]
 BanStatus = Literal["legal", "banned", "restricted", "pair_banned"]
 ActiveBanStatus = Literal["banned", "restricted", "pair_banned"]
+RestrictionScope = Literal["active", "upcoming"]
 
 VALID_BAN_STATUSES: tuple[BanStatus, ...] = (
     "legal",
@@ -174,6 +175,7 @@ class CardRestrictionRecord:
     restriction_note: str | None = None
     effective_date: str | None = None
     source_url: str | None = None
+    scope: RestrictionScope = "active"
 
 
 @dataclass(frozen=True, slots=True)
