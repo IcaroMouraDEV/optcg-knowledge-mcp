@@ -5,7 +5,19 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
+
+TRM_SECTIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS trm_sections (
+    section_id TEXT PRIMARY KEY,
+    parent_id TEXT REFERENCES trm_sections(section_id) ON DELETE SET NULL,
+    section TEXT NOT NULL,
+    title TEXT NOT NULL,
+    text TEXT NOT NULL,
+    trm_version TEXT,
+    effective_date TEXT
+)
+"""
 
 BASE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS rules (
@@ -19,6 +31,19 @@ CREATE TABLE IF NOT EXISTS rules (
 
 CREATE INDEX IF NOT EXISTS idx_rules_parent_id ON rules(parent_id);
 CREATE INDEX IF NOT EXISTS idx_rules_section ON rules(section);
+
+CREATE TABLE IF NOT EXISTS trm_sections (
+    section_id TEXT PRIMARY KEY,
+    parent_id TEXT REFERENCES trm_sections(section_id) ON DELETE SET NULL,
+    section TEXT NOT NULL,
+    title TEXT NOT NULL,
+    text TEXT NOT NULL,
+    trm_version TEXT,
+    effective_date TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trm_sections_parent_id ON trm_sections(parent_id);
+CREATE INDEX IF NOT EXISTS idx_trm_sections_section ON trm_sections(section);
 
 CREATE TABLE IF NOT EXISTS cards (
     card_id TEXT PRIMARY KEY,
@@ -82,7 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_ruling_rules_rule_id ON ruling_rules(rule_id);
 
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id TEXT PRIMARY KEY,
-    doc_type TEXT NOT NULL CHECK (doc_type IN ('rule', 'ruling', 'card')),
+    doc_type TEXT NOT NULL CHECK (doc_type IN ('rule', 'ruling', 'card', 'tournament_rule')),
     doc_id TEXT NOT NULL,
     text TEXT NOT NULL,
     authority INTEGER NOT NULL CHECK (authority IN (1, 2, 3, 4)),
@@ -212,6 +237,96 @@ def migrate_schema(conn: sqlite3.Connection) -> bool:
             CHECK (judge_tier IS NULL OR judge_tier IN ('tier_0', 'tier_2', 'tier_1'))
             """
         )
+        migrated = True
+
+    has_trm_sections = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trm_sections'"
+    ).fetchone()
+    if has_trm_sections is None:
+        conn.execute(TRM_SECTIONS_TABLE_SQL)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trm_sections_parent_id ON trm_sections(parent_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trm_sections_section ON trm_sections(section)"
+        )
+        migrated = True
+
+    chunks_sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks'"
+    ).fetchone()
+    chunks_sql = str(chunks_sql_row[0]) if chunks_sql_row and chunks_sql_row[0] else ""
+    if chunks_sql and "'tournament_rule'" not in chunks_sql:
+        # Rebuild chunks atomically while preserving exact rowids so chunks_vec stays valid.
+        conn.execute("DROP TRIGGER IF EXISTS chunks_ai")
+        conn.execute("DROP TRIGGER IF EXISTS chunks_ad")
+        conn.execute("DROP TRIGGER IF EXISTS chunks_au")
+        conn.execute("DROP INDEX IF EXISTS idx_chunks_doc")
+        conn.execute("DROP INDEX IF EXISTS idx_chunks_authority")
+        conn.execute(
+            """
+            CREATE TABLE chunks_v3_migration (
+                chunk_id TEXT PRIMARY KEY,
+                doc_type TEXT NOT NULL CHECK (
+                    doc_type IN ('rule', 'ruling', 'card', 'tournament_rule')
+                ),
+                doc_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                authority INTEGER NOT NULL CHECK (authority IN (1, 2, 3, 4)),
+                metadata TEXT NOT NULL DEFAULT '{}',
+                content_hash TEXT NOT NULL,
+                embedded_hash TEXT,
+                embedded_model TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO chunks_v3_migration (
+                rowid, chunk_id, doc_type, doc_id, text, authority,
+                metadata, content_hash, embedded_hash, embedded_model
+            )
+            SELECT
+                rowid, chunk_id, doc_type, doc_id, text, authority,
+                metadata, content_hash, embedded_hash, embedded_model
+            FROM chunks
+            """
+        )
+        conn.execute("DROP TABLE chunks")
+        conn.execute("ALTER TABLE chunks_v3_migration RENAME TO chunks")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_type, doc_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_authority ON chunks(authority)")
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, text)
+                VALUES ('delete', old.rowid, old.text);
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF text ON chunks
+            WHEN old.text IS NOT new.text
+            BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, text)
+                VALUES ('delete', old.rowid, old.text);
+                INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+            END
+            """
+        )
+        has_fts = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'"
+        ).fetchone()
+        if has_fts is not None:
+            conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
         migrated = True
 
     if migrated or get_meta(conn, "schema_version") != SCHEMA_VERSION:

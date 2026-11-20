@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from optcg_knowledge.db import connect
-from optcg_knowledge.ingest import HashEmbedder
+from optcg_knowledge.ingest import HashEmbedder, embed_chunks, ingest_trm, parse_trm_text
 from optcg_knowledge.mcp import create_server
 
 
@@ -40,6 +40,7 @@ def test_mcp_server_registers_all_tools_and_prompts(
     assert set(tool_names) == {
         "search",
         "get_rule",
+        "get_trm_section",
         "get_card",
         "search_cards",
         "get_card_rulings",
@@ -188,9 +189,83 @@ def test_mcp_query_tools_contracts_and_zero_stdout_leak(
     prompt_text = out["prompt"].messages[0].content.text
     assert "authority = 1" in prompt_text
     assert "get_card_rulings" in prompt_text
+    assert "get_trm_section" in prompt_text
+    assert "tournament_rules" in prompt_text
     assert "potentially_outdated" in prompt_text
     assert "optcg-engine" in prompt_text
     assert "OP05-119" in prompt_text
+
+
+def test_mcp_trm_tool_and_search_filtering_zero_stdout_leak(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, embedder = populated_db
+    trm_doc = parse_trm_text(
+        """\
+Last Updated: October 17, 2025
+7.0 Tournament Penalties
+Judges maintain event fairness.
+7.4 Examples of Infractions
+Infractions and remedies.
+7.4.1 Game Play Error
+Accidental rules violations.
+1. Failing to Observe Game Rules
+Failure to follow a game rule.
+Penalty: Warning
+Resolution: Reverse the game state if possible.
+2. Forgetting to Resolve Automatic Actions
+Missed mandatory trigger.
+Penalty: Warning
+Resolution: Carry out the mandatory effect from the closest checkpoint.
+"""
+    )
+    ingest_trm(conn, trm_doc)
+    embed_chunks(conn, embedder)
+
+    server = create_server(db_path=db_path, embedder=embedder)
+
+    async def _run() -> dict[str, Any]:
+        trm_section = _extract_json_payload(
+            await server.call_tool(
+                "get_trm_section",
+                {"section_id": "TRM-7.4.1", "include_children": True},
+            )
+        )
+        trm_missing = _extract_json_payload(
+            await server.call_tool("get_trm_section", {"section_id": "TRM-99.9"})
+        )
+        trm_search = _extract_json_payload(
+            await server.call_tool(
+                "search",
+                {
+                    "query": "missed mandatory trigger warning",
+                    "doc_types": ["tournament_rule"],
+                    "k": 5,
+                },
+            )
+        )
+        return {
+            "trm_section": trm_section,
+            "trm_missing": trm_missing,
+            "trm_search": trm_search,
+        }
+
+    res = asyncio.run(_run())
+    assert capsys.readouterr().out == ""
+
+    assert res["trm_section"]["found"] is True
+    assert res["trm_section"]["section_id"] == "TRM-7.4.1"
+    assert res["trm_section"]["source"] == "tournament_rules"
+    assert [a["section_id"] for a in res["trm_section"]["ancestors"]] == ["TRM-7.0", "TRM-7.4"]
+    assert [c["section_id"] for c in res["trm_section"]["children"]] == [
+        "TRM-7.4.1.1",
+        "TRM-7.4.1.2",
+    ]
+    assert res["trm_missing"]["found"] is False
+    assert res["trm_search"]["results"][0]["doc_id"] == "TRM-7.4.1.2"
+    assert res["trm_search"]["results"][0]["source"] == "tournament_rules"
+    assert all(r["doc_type"] == "tournament_rule" for r in res["trm_search"]["results"])
 
 
 def test_mcp_server_degrades_gracefully_without_vectors_or_embedder(

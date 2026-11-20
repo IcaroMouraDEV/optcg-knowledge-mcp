@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from optcg_knowledge.db.schema import get_meta
+from optcg_knowledge.ingest.trm_parser import TRM_ID_PREFIX, normalize_trm_section_id
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _CARD_LIKE_RE = re.compile(r"^(?:(?:OP|ST|EB|PRB)\d{2}-\d{3}|P-\d{3})$", re.IGNORECASE)
@@ -56,6 +57,36 @@ def _extract_variant_count(raw_json_str: str | None) -> int:
         if isinstance(variants, list):
             return 1 + len(variants)
     return 1
+
+
+def _trm_sort_key(section_id: str) -> tuple[tuple[int, int | str], ...]:
+    """Natural numeric sort key so 'TRM-7.4.2' sorts before 'TRM-7.4.10'."""
+    raw = (
+        section_id[len(TRM_ID_PREFIX) :]
+        if section_id.upper().startswith(TRM_ID_PREFIX)
+        else section_id
+    )
+    parts: list[tuple[int, int | str]] = []
+    for segment in raw.split("."):
+        if segment.isdigit():
+            parts.append((0, int(segment)))
+        else:
+            parts.append((1, segment.lower()))
+    return tuple(parts)
+
+
+def _serialize_trm_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "section_id": str(row["section_id"]),
+        "parent_id": str(row["parent_id"]) if row["parent_id"] is not None else None,
+        "section": str(row["section"]),
+        "title": str(row["title"]),
+        "text": str(row["text"]),
+        "trm_version": str(row["trm_version"]) if row["trm_version"] is not None else None,
+        "effective_date": (
+            str(row["effective_date"]) if row["effective_date"] is not None else None
+        ),
+    }
 
 
 def _serialize_rule_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -169,6 +200,114 @@ def get_rule(
         "rule_id": normalized_id,
         "rules_version": current_rules_version,
         "rule": _serialize_rule_row(row),
+        "ancestors": ancestors,
+        "children": children,
+    }
+
+
+def get_trm_section(
+    conn: sqlite3.Connection,
+    section_id: str,
+    *,
+    include_children: bool = True,
+) -> dict[str, Any]:
+    """Fetch a Tournament Rules Manual (TRM) section, ancestors, and optional descendants."""
+    normalized_id = normalize_trm_section_id(section_id)
+    current_trm_version = get_meta(conn, "trm_version")
+    current_trm_effective_date = get_meta(conn, "trm_effective_date")
+
+    if not normalized_id:
+        return {
+            "found": False,
+            "section_id": normalized_id,
+            "source": "tournament_rules",
+            "trm_version": current_trm_version,
+            "trm_effective_date": current_trm_effective_date,
+            "section": None,
+            "ancestors": [],
+            "children": [],
+        }
+
+    row = conn.execute(
+        """
+        SELECT section_id, parent_id, section, title, text, trm_version, effective_date
+        FROM trm_sections
+        WHERE UPPER(section_id) = UPPER(?)
+        """,
+        (normalized_id,),
+    ).fetchone()
+
+    if row is None:
+        return {
+            "found": False,
+            "section_id": normalized_id,
+            "source": "tournament_rules",
+            "trm_version": current_trm_version,
+            "trm_effective_date": current_trm_effective_date,
+            "section": None,
+            "ancestors": [],
+            "children": [],
+        }
+
+    canonical_id = str(row["section_id"])
+    ancestors: list[dict[str, Any]] = []
+    seen_ids: set[str] = {canonical_id}
+    cursor = row["parent_id"]
+    while cursor is not None and str(cursor) not in seen_ids:
+        seen_ids.add(str(cursor))
+        parent_row = conn.execute(
+            """
+            SELECT section_id, parent_id, section, title, text, trm_version, effective_date
+            FROM trm_sections
+            WHERE section_id = ?
+            """,
+            (str(cursor),),
+        ).fetchone()
+        if parent_row is None:
+            break
+        ancestors.append(_serialize_trm_row(parent_row))
+        cursor = parent_row["parent_id"]
+    ancestors.reverse()
+
+    children: list[dict[str, Any]] = []
+    if include_children:
+        raw_num = (
+            canonical_id[len(TRM_ID_PREFIX) :]
+            if canonical_id.upper().startswith(TRM_ID_PREFIX)
+            else canonical_id
+        )
+        parts = raw_num.split(".")
+        if len(parts) == 2 and parts[1] == "0":
+            prefix_pattern = f"{TRM_ID_PREFIX}{parts[0]}.%"
+        else:
+            prefix_pattern = f"{canonical_id}.%"
+
+        child_rows = conn.execute(
+            """
+            SELECT section_id, parent_id, section, title, text, trm_version, effective_date
+            FROM trm_sections
+            WHERE UPPER(section_id) LIKE UPPER(?) OR parent_id = ?
+            """,
+            (prefix_pattern, canonical_id),
+        ).fetchall()
+        deduped = {
+            str(r["section_id"]): r
+            for r in child_rows
+            if str(r["section_id"]) != canonical_id
+        }
+        ordered = sorted(
+            deduped.values(),
+            key=lambda r: _trm_sort_key(str(r["section_id"])),
+        )
+        children = [_serialize_trm_row(r) for r in ordered]
+
+    return {
+        "found": True,
+        "section_id": canonical_id,
+        "source": "tournament_rules",
+        "trm_version": current_trm_version,
+        "trm_effective_date": current_trm_effective_date,
+        "section": _serialize_trm_row(row),
         "ancestors": ancestors,
         "children": children,
     }

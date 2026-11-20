@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 AuthorityLevel = Literal[1, 2, 3, 4]
 SourceType = Literal["rules", "official_faq", "errata", "judge", "community"]
-DocType = Literal["rule", "ruling", "card"]
+DocType = Literal["rule", "ruling", "card", "tournament_rule"]
 JudgeTier = Literal["tier_0", "tier_2", "tier_1"]
 
 AUTHORITY_BY_SOURCE: dict[SourceType, AuthorityLevel] = {
@@ -83,6 +83,19 @@ class RuleRecord:
     section: str
     text: str
     rules_version: str | None = None
+    effective_date: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrmSectionRecord:
+    """A single official Tournament Rules Manual (TRM) section or infraction entry."""
+
+    section_id: str
+    parent_id: str | None
+    section: str
+    title: str
+    text: str
+    trm_version: str | None = None
     effective_date: str | None = None
 
 
