@@ -16,6 +16,10 @@ from optcg_knowledge.ingest.cards_importer import ingest_cards
 from optcg_knowledge.ingest.embed_pipeline import embed_chunks
 from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbedder
 from optcg_knowledge.ingest.faq_parser import ingest_faqs, parse_faq_path
+from optcg_knowledge.ingest.official_downloader import (
+    DEFAULT_OFFICIAL_BASE_URL,
+    fetch_official_docs,
+)
 from optcg_knowledge.ingest.rules_parser import ingest_rules, parse_rules_pdf
 from optcg_knowledge.ingest.sources import CardSource, LocalCardSource, PunkRecordsSource
 
@@ -66,6 +70,33 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "init-db",
         help="Initialize or verify the SQLite schema (FTS5 + sqlite-vec).",
+    )
+
+    fetch_parser = subparsers.add_parser(
+        "fetch-official",
+        help="Download official Bandai Comprehensive Rules PDF, FAQ PDFs, and errata HTML.",
+    )
+    fetch_parser.add_argument(
+        "--only",
+        choices=("all", "rules", "faq", "errata"),
+        default="all",
+        help="Download only a subset of official documents (default: all).",
+    )
+    fetch_parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Target raw data directory (defaults to OPTCG_RAW_DATA_DIR or data/raw).",
+    )
+    fetch_parser.add_argument(
+        "--base-url",
+        default=DEFAULT_OFFICIAL_BASE_URL,
+        help=f"Official site base URL (default: {DEFAULT_OFFICIAL_BASE_URL}).",
+    )
+    fetch_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download files even if they already match the saved revision manifest.",
     )
 
     rules_parser = subparsers.add_parser(
@@ -263,6 +294,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"Initialized database at {settings.db_path} "
             f"(model={settings.embedding_model}, dim={settings.embedding_dim})"
+        )
+        return 0
+
+    if args.command == "fetch-official":
+        out_dir = args.out_dir or settings.raw_data_dir
+        summary = fetch_official_docs(
+            out_dir,
+            only=args.only,
+            base_url=args.base_url,
+            force=args.force,
+        )
+        print(
+            f"Fetched official Bandai docs into {summary.out_dir} "
+            f"(downloaded={summary.downloaded}, skipped={summary.skipped}, "
+            f"rules={summary.rules_files}, faq={summary.faq_files}, errata={summary.errata_files})"
         )
         return 0
 

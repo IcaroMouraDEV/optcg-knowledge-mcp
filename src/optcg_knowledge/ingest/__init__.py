@@ -26,6 +26,11 @@ from optcg_knowledge.ingest.faq_parser import (
     parse_faq_pdf,
     parse_faq_text,
 )
+from optcg_knowledge.ingest.official_downloader import (
+    DEFAULT_OFFICIAL_BASE_URL,
+    OfficialFetchSummary,
+    fetch_official_docs,
+)
 from optcg_knowledge.ingest.rules_parser import (
     ParsedRulesDocument,
     RulesIngestSummary,
@@ -36,10 +41,12 @@ from optcg_knowledge.ingest.rules_parser import (
 
 __all__ = [
     "CardsIngestSummary",
+    "DEFAULT_OFFICIAL_BASE_URL",
     "EmbedSummary",
     "Embedder",
     "FaqIngestSummary",
     "HashEmbedder",
+    "OfficialFetchSummary",
     "ParsedFaqDocument",
     "ParsedFaqEntry",
     "ParsedRulesDocument",
@@ -50,6 +57,7 @@ __all__ = [
     "build_ruling_chunk",
     "compute_content_hash",
     "embed_chunks",
+    "fetch_official_docs",
     "ingest_cards",
     "ingest_faqs",
     "ingest_rules",

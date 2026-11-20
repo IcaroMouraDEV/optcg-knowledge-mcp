@@ -49,31 +49,31 @@ Default local embedding model is `BAAI/bge-m3` (`1024` dims, FP16 on CUDA with `
 
 All ingestion commands are **idempotent** and safe to re-run without duplicating rows or re-embedding unchanged chunks. Raw Bandai PDFs/HTML and chat dumps live under `data/raw/` (gitignored).
 
-### 1. Initialize database (optional; auto-initialized by ingest commands)
+### 1. Download official Bandai rules, FAQ PDFs, and errata HTML
+Downloads the official Comprehensive Rules PDF (`data/raw/rules/rule_comprehensive.pdf`), all official FAQ PDFs (`data/raw/faq/*.pdf`), and the text-only errata HTML page (`data/raw/faq/errata_card.html`) directly from Bandai's English website (skips unchanged files on re-run, never downloads card images):
 ```bash
-uv run optcg-ingest init-db
+uv run optcg-ingest fetch-official
+# Or fetch only one category: --only rules | faq | errata
 ```
 
 ### 2. Ingest Comprehensive Rules PDF (`authority = 1`)
-Place the official Comprehensive Rules PDF in `data/raw/rules/` and run:
 ```bash
 uv run optcg-ingest rules data/raw/rules/rule_comprehensive.pdf
 ```
 
 ### 3. Ingest canonical cards (text/stats + `image_url` only)
-From local JSON files in `data/raw/cards/`:
-```bash
-uv run optcg-ingest cards --source local --path data/raw/cards
-```
-Or from `punk-records` JSON packs:
+From `punk-records` JSON packs:
 ```bash
 uv run optcg-ingest cards --source punk-records
 # Optional subset of packs:
 uv run optcg-ingest cards --source punk-records --packs OP01,OP05,ST10
 ```
+Or from local JSON files in `data/raw/cards/`:
+```bash
+uv run optcg-ingest cards --source local --path data/raw/cards
+```
 
 ### 4. Ingest official FAQs & errata (`authority = 2`)
-Place official Bandai FAQ PDFs and/or the official card errata HTML page into `data/raw/faq/` and run:
 ```bash
 uv run optcg-ingest faq data/raw/faq/
 ```
