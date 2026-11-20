@@ -10,7 +10,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from optcg_knowledge.config import Settings, get_settings
-from optcg_knowledge.curation.rulings import export_rulings, import_rulings
+from optcg_knowledge.curation.rulings import (
+    RulingsValidationError,
+    export_rulings,
+    import_rulings,
+    validate_rulings,
+)
 from optcg_knowledge.db import init_schema, migrate_schema, open_db
 from optcg_knowledge.ingest.cards_importer import ingest_cards
 from optcg_knowledge.ingest.embed_pipeline import embed_chunks
@@ -266,6 +271,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Rulings JSON file or directory (defaults to data/rulings).",
     )
 
+    validate_parser = subparsers.add_parser(
+        "validate-rulings",
+        help=(
+            "Validate tracked rulings JSON schema, zero PII, and superseded_by "
+            "integrity via an in-memory SQLite dry-run."
+        ),
+    )
+    validate_parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Rulings JSON file or directory (defaults to data/rulings).",
+    )
+
     return parser
 
 
@@ -465,6 +485,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"Imported {summary.rulings_upserted} rulings from {summary.files_processed} file(s) "
             f"(card_links={summary.card_links_upserted}, rule_links={summary.rule_links_upserted}, "
             f"superseded={summary.superseded_links_applied}, chunks={summary.chunks_upserted})"
+        )
+        return 0
+
+    if args.command == "validate-rulings":
+        validate_path = args.path or (settings.db_path.parent / "rulings")
+        try:
+            summary = validate_rulings(validate_path)
+        except (RulingsValidationError, FileNotFoundError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        for warning in summary.warnings:
+            print(f"WARNING: {warning}", file=sys.stderr)
+        print(
+            f"Validated {summary.rulings_checked} ruling(s) across "
+            f"{summary.json_files_checked} JSON file(s) and "
+            f"{summary.thread_files_checked} thread file(s) "
+            f"(superseded_links={summary.superseded_links_checked}, "
+            f"warnings={len(summary.warnings)})"
         )
         return 0
 

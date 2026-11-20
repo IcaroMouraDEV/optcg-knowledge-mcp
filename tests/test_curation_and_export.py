@@ -13,11 +13,13 @@ import pytest
 from optcg_knowledge.cli import main as cli_main
 from optcg_knowledge.curation import (
     EXPORT_SCHEMA_VERSION,
+    RulingsValidationError,
     add_ruling,
     export_rulings,
     import_rulings,
     list_unreviewed_rulings,
     mark_ruling,
+    validate_rulings,
 )
 from optcg_knowledge.db import SCHEMA_VERSION, connect, get_meta, migrate_schema
 from optcg_knowledge.ingest import HashEmbedder, embed_chunks
@@ -527,3 +529,228 @@ def test_import_rulings_roundtrip_idempotency_and_cli(
     tracked_db = tmp_path / "tracked_import.db"
     assert cli_main(["--db", str(tracked_db), "import-rulings", str(repo_rulings)]) == 0
     capsys.readouterr()
+
+
+def _make_export_envelope(rulings: list[dict[str, Any]], **overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "exported_at": "2026-11-20T00:00:00+00:00",
+        "rules_version": "1.24",
+        "filters": {
+            "card_id": None,
+            "since": None,
+            "min_authority": None,
+            "source": "judge",
+            "include_superseded": True,
+            "include_unreviewed": False,
+        },
+        "total": len(rulings),
+        "rulings": rulings,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _make_ruling_dict(ruling_id: str, **overrides: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "ruling_id": ruling_id,
+        "question": "Does OP05-119 gain an extra turn after returning 10 DON!!?",
+        "answer": "Yes, the extra turn begins after the current End Phase.",
+        "source": "judge",
+        "authority": 3,
+        "judge_tier": "tier_0",
+        "date": "2026-11-18",
+        "rules_version": "1.24",
+        "url": None,
+        "raw_ref": "data/rulings/threads/2026-11-18-sample.md",
+        "superseded_by": None,
+        "reviewed": True,
+        "card_ids": ["OP05-119"],
+        "rule_ids": ["7-1-4-1"],
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_validate_rulings_accepts_repo_data_and_cross_source_warning(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_rulings_dir = Path(__file__).resolve().parents[1] / "data" / "rulings"
+    summary = validate_rulings(repo_rulings_dir)
+    assert summary.json_files_checked >= 1
+    assert summary.thread_files_checked >= 1
+    assert summary.rulings_checked >= 1
+    assert summary.warnings == ()
+
+    # CLI exits 0 on tracked repository rulings.
+    assert cli_main(["validate-rulings", str(repo_rulings_dir)]) == 0
+    captured = capsys.readouterr()
+    assert f"Validated {summary.rulings_checked} ruling(s)" in captured.out
+    assert captured.err == ""
+
+    # Valid chain (old -> new) + cross-source superseded_by (faq:...) succeeds with 1 warning.
+    rulings_dir = tmp_path / "rulings"
+    (rulings_dir / "threads").mkdir(parents=True)
+    (rulings_dir / "threads" / "2026-11-18-clean.md").write_text(
+        "[PLAYER]\nQuestion about OP05-119?\n[JUDGE T0]\nYes.\n",
+        encoding="utf-8",
+    )
+    payload = _make_export_envelope(
+        [
+            _make_ruling_dict(
+                "judge:OP05-119:old1",
+                superseded_by="judge:OP05-119:new1",
+                judge_tier="tier_1",
+            ),
+            _make_ruling_dict("judge:OP05-119:new1", judge_tier="tier_0"),
+            _make_ruling_dict(
+                "judge:OP05-119:faqref",
+                superseded_by="faq:OP05-119:official1",
+                judge_tier="tier_2",
+            ),
+        ]
+    )
+    (rulings_dir / "judge_rulings.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+    exit_code = cli_main(["validate-rulings", str(rulings_dir)])
+    assert exit_code == 0
+    cli_out = capsys.readouterr()
+    assert "Validated 3 ruling(s) across 1 JSON file(s) and 1 thread file(s)" in cli_out.out
+    assert "WARNING:" in cli_out.err
+    assert "faq:OP05-119:official1" in cli_out.err
+
+
+def test_validate_rulings_rejects_invalid_json_schema_and_domain_invariants(
+    tmp_path: Path,
+) -> None:
+    # 1. Malformed JSON
+    bad_json_dir = tmp_path / "bad_json"
+    bad_json_dir.mkdir()
+    (bad_json_dir / "broken.json").write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(RulingsValidationError, match="invalid JSON"):
+        validate_rulings(bad_json_dir)
+
+    # 2. Envelope + field invariant violations collected in one report
+    bad_schema_dir = tmp_path / "bad_schema"
+    bad_schema_dir.mkdir()
+    file_a = _make_export_envelope(
+        [
+            _make_ruling_dict(
+                "judge:OP05-119:dup1",
+                authority=1,  # tampered authority (judge must be 3)
+                card_ids=["op05-119"],  # non-canonical lowercase
+                rule_ids=["rule-7"],  # invalid rule ID
+                rule_refs=["7-1-1"],  # disallowed alias key
+                date="Nov 18, 2026",  # non-ISO date
+            ),
+            _make_ruling_dict(
+                "community:OP05-119:badtier",
+                source="community",
+                authority=4,
+                judge_tier="tier_1",  # judge_tier forbidden for community
+            ),
+        ],
+        schema_version="2.0",
+        total=99,
+    )
+    file_b = _make_export_envelope([_make_ruling_dict("judge:OP05-119:dup1")])
+    (bad_schema_dir / "a.json").write_text(json.dumps(file_a), encoding="utf-8")
+    (bad_schema_dir / "b.json").write_text(json.dumps(file_b), encoding="utf-8")
+
+    with pytest.raises(RulingsValidationError) as exc_info:
+        validate_rulings(bad_schema_dir)
+
+    msg = str(exc_info.value)
+    assert "schema_version='1.0'" in msg
+    assert "total=99" in msg
+    assert "authority=1 does not match source='judge'" in msg
+    assert "invalid canonical card_ids entry 'op05-119'" in msg
+    assert "invalid canonical rule_ids entry 'rule-7'" in msg
+    assert "unexpected key 'rule_refs'" in msg
+    assert "must be an ISO string 'YYYY-MM-DD'" in msg
+    assert "judge_tier can only be set when source == 'judge'" in msg
+    assert "duplicate ruling_id" in msg
+
+
+def test_validate_rulings_rejects_pii_in_json_and_threads_markdown(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rulings_dir = tmp_path / "pii_rulings"
+    threads_dir = rulings_dir / "threads"
+    threads_dir.mkdir(parents=True)
+
+    # TEMPLATE.md inside threads/ is ignored, while actual thread files are scanned.
+    (threads_dir / "TEMPLATE.md").write_text("Example placeholder @ignored\n", encoding="utf-8")
+    (threads_dir / "2026-11-20-leaked.md").write_text(
+        "[PLAYER]\nQuestion\n[JUDGE]\nConfirmed by JudgeAlice#1234.\n",
+        encoding="utf-8",
+    )
+
+    payload = _make_export_envelope(
+        [
+            _make_ruling_dict(
+                "judge:OP05-119:pii1",
+                question="Asked by <@123456789012345678> about OP05-119?",
+                answer="Confirmed by @HeadJudge.",
+            )
+        ]
+    )
+    (rulings_dir / "judge_rulings.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    exit_code = cli_main(["validate-rulings", str(rulings_dir)])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Discord user mention" in captured.err
+    assert "@handle" in captured.err
+    assert "2026-11-20-leaked.md:4" in captured.err
+    assert "username#0000" in captured.err
+    assert "TEMPLATE.md" not in captured.err
+
+
+def test_validate_rulings_rejects_superseded_by_self_missing_and_cycles(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # 1. Self-superseding + missing judge target
+    bad_links_dir = tmp_path / "bad_links"
+    bad_links_dir.mkdir()
+    payload_links = _make_export_envelope(
+        [
+            _make_ruling_dict("judge:OP05-119:self1", superseded_by="judge:OP05-119:self1"),
+            _make_ruling_dict("judge:OP05-119:dangling1", superseded_by="judge:OP05-119:missing"),
+        ]
+    )
+    (bad_links_dir / "judge_rulings.json").write_text(json.dumps(payload_links), encoding="utf-8")
+    with pytest.raises(RulingsValidationError) as exc_links:
+        validate_rulings(bad_links_dir)
+    assert "cannot supersede itself" in str(exc_links.value)
+    assert "not found" in str(exc_links.value)
+
+    # 2. Multi-hop cycle (A -> B -> C -> A) split across two files
+    cycle_dir = tmp_path / "cycle_rulings"
+    cycle_dir.mkdir()
+    part1 = _make_export_envelope(
+        [
+            _make_ruling_dict("judge:OP05-119:a", superseded_by="judge:OP05-119:b"),
+            _make_ruling_dict("judge:OP05-119:b", superseded_by="judge:OP05-119:c"),
+        ]
+    )
+    part2 = _make_export_envelope(
+        [
+            _make_ruling_dict("judge:OP05-119:c", superseded_by="judge:OP05-119:a"),
+        ]
+    )
+    (cycle_dir / "part1.json").write_text(json.dumps(part1), encoding="utf-8")
+    (cycle_dir / "part2.json").write_text(json.dumps(part2), encoding="utf-8")
+
+    exit_code = cli_main(["validate-rulings", str(cycle_dir)])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Circular superseded_by chain detected" in captured.err
