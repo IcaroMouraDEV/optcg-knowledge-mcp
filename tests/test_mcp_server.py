@@ -33,6 +33,17 @@ def _extract_json_payload(call_result: Any) -> dict[str, Any]:
     return parsed
 
 
+def _extract_resource_json(read_result: Any) -> dict[str, Any]:
+    items = list(read_result)
+    assert len(items) == 1
+    item = items[0]
+    assert item.mime_type == "application/json"
+    assert isinstance(item.content, str)
+    parsed = json.loads(item.content)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
 def test_mcp_server_registers_all_tools_and_prompts(
     populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
     capsys: pytest.CaptureFixture[str],
@@ -40,12 +51,14 @@ def test_mcp_server_registers_all_tools_and_prompts(
     db_path, _, embedder = populated_db
     server = create_server(db_path=db_path, embedder=embedder)
 
-    async def _inspect() -> tuple[list[str], list[str]]:
+    async def _inspect() -> tuple[list[str], list[str], list[str], list[str]]:
         tools = [t.name for t in await server.list_tools()]
         prompts = [p.name for p in await server.list_prompts()]
-        return (tools, prompts)
+        resources = [str(r.uri) for r in await server.list_resources()]
+        templates = [t.uri_template for t in await server.list_resource_templates()]
+        return (tools, prompts, resources, templates)
 
-    tool_names, prompt_names = asyncio.run(_inspect())
+    tool_names, prompt_names, resource_uris, template_uris = asyncio.run(_inspect())
     assert set(tool_names) == {
         "search",
         "get_rule",
@@ -63,6 +76,12 @@ def test_mcp_server_registers_all_tools_and_prompts(
         "export_rulings",
     }
     assert set(prompt_names) == {"juiz", "curar"}
+    assert set(resource_uris) == {"optcg://status", "optcg://banlist"}
+    assert set(template_uris) == {
+        "optcg://rules/{rule_id}",
+        "optcg://trm/{section_id}",
+        "optcg://cards/{card_id}",
+    }
 
     # Strict stdio protocol integrity: nothing written to stdout.
     assert capsys.readouterr().out == ""
@@ -761,3 +780,150 @@ def test_mcp_get_cards_batch_pagination_banlist_rulings_and_validation(
         get_cards(conn, ["OP05-119"], page=0)
     with pytest.raises(ValueError, match="page_size must be a positive integer"):
         get_cards(conn, ["OP05-119"], page_size=0)
+
+
+def test_mcp_resources_list_and_read_contracts_zero_stdout_leak(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, embedder = populated_db
+    trm_doc = parse_trm_text(
+        """\
+Last Updated: October 17, 2025
+7.0 Tournament Penalties
+Judges maintain event fairness.
+7.4 Examples of Infractions
+Infractions and remedies.
+7.4.1 Game Play Error
+Accidental rules violations.
+1. Failing to Observe Game Rules
+Failure to follow a game rule.
+Penalty: Warning
+Resolution: Reverse the game state if possible.
+2. Forgetting to Resolve Automatic Actions
+Missed mandatory trigger.
+Penalty: Warning
+Resolution: Carry out the mandatory effect from the closest checkpoint.
+"""
+    )
+    ingest_trm(conn, trm_doc)
+
+    banlist_doc, _ = parse_banlist_json(
+        {
+            "effective_date": "2026-10-12",
+            "upcoming_effective_date": "2026-11-27",
+            "restrictions": [
+                {"card_id": "OP04-083", "ban_status": "restricted"},
+            ],
+            "upcoming_banned_pairs": [["OP05-119", "ST10-001"]],
+        }
+    )
+    ingest_banlist(conn, banlist_doc)
+
+    server = create_server(db_path=db_path, embedder=embedder)
+    instructions = server.instructions or ""
+    assert "optcg://status" in instructions
+    assert "optcg://banlist" in instructions
+    assert "optcg://rules/{rule_id}" in instructions
+    assert "optcg://trm/{section_id}" in instructions
+    assert "optcg://cards/{card_id}" in instructions
+
+    async def _run() -> dict[str, Any]:
+        static_resources = await server.list_resources()
+        resource_templates = await server.list_resource_templates()
+
+        res_status = _extract_resource_json(await server.read_resource("optcg://status"))
+        tool_status = _extract_json_payload(await server.call_tool("get_status", {}))
+
+        res_banlist = _extract_resource_json(await server.read_resource("optcg://banlist"))
+        tool_banlist = _extract_json_payload(await server.call_tool("get_banlist", {}))
+
+        res_rule = _extract_resource_json(await server.read_resource("optcg://rules/7-1-4"))
+        tool_rule = _extract_json_payload(
+            await server.call_tool("get_rule", {"rule_id": "7-1-4", "include_children": True})
+        )
+        res_rule_missing = _extract_resource_json(
+            await server.read_resource("optcg://rules/99-9-9")
+        )
+
+        res_trm = _extract_resource_json(await server.read_resource("optcg://trm/TRM-7.4.1"))
+        tool_trm = _extract_json_payload(
+            await server.call_tool(
+                "get_trm_section",
+                {"section_id": "TRM-7.4.1", "include_children": True},
+            )
+        )
+        res_trm_missing = _extract_resource_json(
+            await server.read_resource("optcg://trm/TRM-99.9")
+        )
+
+        res_card = _extract_resource_json(await server.read_resource("optcg://cards/OP05-119"))
+        tool_card = _extract_json_payload(
+            await server.call_tool("get_card", {"id_or_name": "OP05-119"})
+        )
+        res_card_missing = _extract_resource_json(
+            await server.read_resource("optcg://cards/OP99-999")
+        )
+
+        return {
+            "static_resources": static_resources,
+            "resource_templates": resource_templates,
+            "res_status": res_status,
+            "tool_status": tool_status,
+            "res_banlist": res_banlist,
+            "tool_banlist": tool_banlist,
+            "res_rule": res_rule,
+            "tool_rule": tool_rule,
+            "res_rule_missing": res_rule_missing,
+            "res_trm": res_trm,
+            "tool_trm": tool_trm,
+            "res_trm_missing": res_trm_missing,
+            "res_card": res_card,
+            "tool_card": tool_card,
+            "res_card_missing": res_card_missing,
+        }
+
+    out = asyncio.run(_run())
+    assert capsys.readouterr().out == ""
+
+    static_by_uri = {str(r.uri): r for r in out["static_resources"]}
+    assert set(static_by_uri) == {"optcg://status", "optcg://banlist"}
+    assert all(r.mime_type == "application/json" for r in static_by_uri.values())
+
+    templates_by_uri = {t.uri_template: t for t in out["resource_templates"]}
+    assert set(templates_by_uri) == {
+        "optcg://rules/{rule_id}",
+        "optcg://trm/{section_id}",
+        "optcg://cards/{card_id}",
+    }
+    assert all(t.mime_type == "application/json" for t in templates_by_uri.values())
+
+    # Exact payload parity with the delegated query tools
+    assert out["res_status"] == out["tool_status"]
+    assert out["res_banlist"] == out["tool_banlist"]
+    assert out["res_rule"] == out["tool_rule"]
+    assert out["res_trm"] == out["tool_trm"]
+    assert out["res_card"] == out["tool_card"]
+
+    # Spot-check domain fields and missing-entity behavior
+    assert out["res_rule"]["found"] is True
+    assert [c["rule_id"] for c in out["res_rule"]["children"]] == [
+        "7-1-4-1",
+        "7-1-4-1-1",
+        "7-1-4-1-1-1",
+    ]
+    assert out["res_rule_missing"]["found"] is False
+
+    assert out["res_trm"]["found"] is True
+    assert [c["section_id"] for c in out["res_trm"]["children"]] == [
+        "TRM-7.4.1.1",
+        "TRM-7.4.1.2",
+    ]
+    assert out["res_trm_missing"]["found"] is False
+
+    assert out["res_card"]["match_type"] == "exact_id"
+    assert out["res_card"]["cards"][0]["card_id"] == "OP05-119"
+    assert out["res_card"]["cards"][0]["ban_status"] == "legal"
+    assert out["res_card"]["cards"][0]["upcoming_restriction"]["ban_status"] == "pair_banned"
+    assert out["res_card_missing"]["match_type"] == "not_found"
+    assert out["res_card_missing"]["cards"] == []
