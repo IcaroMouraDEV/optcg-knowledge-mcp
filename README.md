@@ -270,6 +270,26 @@ uv run ruff check
 uv run pytest -v
 ```
 
+### Retrieval Evaluation Benchmark (PT-BR / EN)
+
+Measure and compare `lexical` (FTS5 BM25 + exact OPTCG tokens) vs `hybrid` (FTS5 + local `sqlite-vec` + RRF) retrieval quality (`Recall@3`, `Recall@8`, `Hit@k`, `MRR`, and authority-order assertions) against your populated `data/optcg.db` using the tracked bilingual dataset at `data/eval/benchmark_queries.json`:
+
+```bash
+# Lexical + hybrid comparison using the default local model (BAAI/bge-m3)
+uv run optcg-ingest eval --verbose-cases
+
+# Compare against a DB embedded with intfloat/multilingual-e5-base
+uv run optcg-ingest --db data/optcg.db --embedding-model intfloat/multilingual-e5-base eval
+
+# Lexical-only run (works without installing the optional [embeddings] extra)
+uv run optcg-ingest eval --mode lexical
+
+# Filter by language or export machine-readable JSON for tuning diffs
+uv run optcg-ingest eval --lang pt-BR --json --out eval_report.json
+```
+
+Optional regression gates (`--min-recall3`, `--min-mrr`, `--fail-on-authority`) return exit code `1` when a threshold is missed.
+
 ---
 
 ## License & Disclaimer
