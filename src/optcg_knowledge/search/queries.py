@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Sequence
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -17,6 +18,8 @@ _CARD_LIKE_RE = re.compile(r"^(?:(?:OP|ST|EB|PRB)\d{2}-\d{3}|P-\d{3})$", re.IGNO
 
 MAX_SEARCH_CARDS_LIMIT = 100
 MAX_FUZZY_CARD_RESULTS = 50
+DEFAULT_BATCH_CARDS_PAGE_SIZE = 25
+MAX_BATCH_CARDS_PAGE_SIZE = 50
 
 
 def _rule_sort_key(rule_id: str) -> tuple[tuple[int, int | str], ...]:
@@ -848,6 +851,82 @@ def get_banlist(
     }
 
 
+def _serialize_ruling_rows(
+    conn: sqlite3.Connection,
+    rows: Sequence[sqlite3.Row],
+    current_rules_version: str | None,
+) -> list[dict[str, Any]]:
+    """Hydrate linked card_ids/rule_ids and serialize deduplicated ruling rows in order."""
+    unique_rows: list[sqlite3.Row] = []
+    seen_ruling_ids: set[str] = set()
+    for row in rows:
+        rid = str(row["ruling_id"])
+        if rid not in seen_ruling_ids:
+            seen_ruling_ids.add(rid)
+            unique_rows.append(row)
+
+    ruling_ids = [str(row["ruling_id"]) for row in unique_rows]
+    cards_by_ruling: dict[str, list[str]] = {rid: [] for rid in ruling_ids}
+    rules_by_ruling: dict[str, list[str]] = {rid: [] for rid in ruling_ids}
+
+    if ruling_ids:
+        placeholders = ", ".join("?" for _ in ruling_ids)
+        for link in conn.execute(
+            f"""
+            SELECT ruling_id, card_id
+            FROM ruling_cards
+            WHERE ruling_id IN ({placeholders})
+            ORDER BY card_id ASC
+            """,
+            ruling_ids,
+        ).fetchall():
+            cards_by_ruling[str(link["ruling_id"])].append(str(link["card_id"]))
+
+        for link in conn.execute(
+            f"""
+            SELECT ruling_id, rule_id
+            FROM ruling_rules
+            WHERE ruling_id IN ({placeholders})
+            """,
+            ruling_ids,
+        ).fetchall():
+            rules_by_ruling[str(link["ruling_id"])].append(str(link["rule_id"]))
+
+        for rid in rules_by_ruling:
+            rules_by_ruling[rid].sort(key=_rule_sort_key)
+
+    rulings: list[dict[str, Any]] = []
+    for row in unique_rows:
+        rid = str(row["ruling_id"])
+        ruling_version = str(row["rules_version"]) if row["rules_version"] is not None else None
+        potentially_outdated = bool(
+            ruling_version and current_rules_version and ruling_version != current_rules_version
+        )
+        rulings.append(
+            {
+                "ruling_id": rid,
+                "question": str(row["question"]),
+                "answer": str(row["answer"]),
+                "source": str(row["source"]),
+                "authority": int(row["authority"]),
+                "judge_tier": (
+                    str(row["judge_tier"]) if row["judge_tier"] is not None else None
+                ),
+                "date": str(row["date"]) if row["date"] is not None else None,
+                "rules_version": ruling_version,
+                "url": str(row["url"]) if row["url"] is not None else None,
+                "superseded_by": (
+                    str(row["superseded_by"]) if row["superseded_by"] is not None else None
+                ),
+                "reviewed": bool(row["reviewed"]),
+                "potentially_outdated": potentially_outdated,
+                "card_ids": cards_by_ruling[rid],
+                "rule_ids": rules_by_ruling[rid],
+            }
+        )
+    return rulings
+
+
 def get_card_rulings(
     conn: sqlite3.Connection,
     card_id: str,
@@ -897,65 +976,7 @@ def get_card_rulings(
         (normalized_id,),
     ).fetchall()
 
-    ruling_ids = [str(row["ruling_id"]) for row in rows]
-    cards_by_ruling: dict[str, list[str]] = {rid: [] for rid in ruling_ids}
-    rules_by_ruling: dict[str, list[str]] = {rid: [] for rid in ruling_ids}
-
-    if ruling_ids:
-        placeholders = ", ".join("?" for _ in ruling_ids)
-        for link in conn.execute(
-            f"""
-            SELECT ruling_id, card_id
-            FROM ruling_cards
-            WHERE ruling_id IN ({placeholders})
-            ORDER BY card_id ASC
-            """,
-            ruling_ids,
-        ).fetchall():
-            cards_by_ruling[str(link["ruling_id"])].append(str(link["card_id"]))
-
-        for link in conn.execute(
-            f"""
-            SELECT ruling_id, rule_id
-            FROM ruling_rules
-            WHERE ruling_id IN ({placeholders})
-            """,
-            ruling_ids,
-        ).fetchall():
-            rules_by_ruling[str(link["ruling_id"])].append(str(link["rule_id"]))
-
-        for rid in rules_by_ruling:
-            rules_by_ruling[rid].sort(key=_rule_sort_key)
-
-    rulings: list[dict[str, Any]] = []
-    for row in rows:
-        rid = str(row["ruling_id"])
-        ruling_version = str(row["rules_version"]) if row["rules_version"] is not None else None
-        potentially_outdated = bool(
-            ruling_version and current_rules_version and ruling_version != current_rules_version
-        )
-        rulings.append(
-            {
-                "ruling_id": rid,
-                "question": str(row["question"]),
-                "answer": str(row["answer"]),
-                "source": str(row["source"]),
-                "authority": int(row["authority"]),
-                "judge_tier": (
-                    str(row["judge_tier"]) if row["judge_tier"] is not None else None
-                ),
-                "date": str(row["date"]) if row["date"] is not None else None,
-                "rules_version": ruling_version,
-                "url": str(row["url"]) if row["url"] is not None else None,
-                "superseded_by": (
-                    str(row["superseded_by"]) if row["superseded_by"] is not None else None
-                ),
-                "reviewed": bool(row["reviewed"]),
-                "potentially_outdated": potentially_outdated,
-                "card_ids": cards_by_ruling[rid],
-                "rule_ids": rules_by_ruling[rid],
-            }
-        )
+    rulings = _serialize_ruling_rows(conn, rows, current_rules_version)
 
     return {
         "card_id": normalized_id,
@@ -964,6 +985,244 @@ def get_card_rulings(
         "include_superseded": include_superseded,
         "total": len(rulings),
         "rulings": rulings,
+    }
+
+
+def get_rule_rulings(
+    conn: sqlite3.Connection,
+    rule_id: str,
+    *,
+    include_superseded: bool = False,
+    include_children: bool = False,
+) -> dict[str, Any]:
+    """Return rulings citing a Comprehensive Rule (and optionally descendant sub-rules)."""
+    normalized_id = rule_id.strip().rstrip(".")
+    current_rules_version = get_meta(conn, "rules_version")
+
+    if not normalized_id:
+        return {
+            "rule_id": normalized_id,
+            "rule_found": False,
+            "current_rules_version": current_rules_version,
+            "include_superseded": include_superseded,
+            "include_children": include_children,
+            "matched_rule_ids": [],
+            "total": 0,
+            "rulings": [],
+        }
+
+    rule_row = conn.execute(
+        "SELECT 1 FROM rules WHERE rule_id = ?",
+        (normalized_id,),
+    ).fetchone()
+    rule_found = rule_row is not None
+
+    if include_children:
+        rule_clause = "(rr.rule_id = ? OR rr.rule_id LIKE ?)"
+        params: list[Any] = [normalized_id, f"{normalized_id}-%"]
+    else:
+        rule_clause = "rr.rule_id = ?"
+        params = [normalized_id]
+
+    superseded_clause = "" if include_superseded else "AND r.superseded_by IS NULL"
+    rows = conn.execute(
+        f"""
+        SELECT
+            rr.rule_id AS matched_rule_id,
+            r.ruling_id,
+            r.question,
+            r.answer,
+            r.source,
+            r.authority,
+            r.judge_tier,
+            r.date,
+            r.rules_version,
+            r.url,
+            r.superseded_by,
+            r.reviewed
+        FROM rulings r
+        JOIN ruling_rules rr ON rr.ruling_id = r.ruling_id
+        WHERE {rule_clause}
+          {superseded_clause}
+        ORDER BY
+            r.authority ASC,
+            CASE r.judge_tier
+                WHEN 'tier_0' THEN 1
+                WHEN 'tier_2' THEN 2
+                WHEN 'tier_1' THEN 3
+                ELSE 4
+            END ASC,
+            COALESCE(r.date, '') DESC,
+            r.ruling_id ASC
+        """,
+        params,
+    ).fetchall()
+
+    matched_rule_ids = sorted(
+        {str(row["matched_rule_id"]) for row in rows},
+        key=_rule_sort_key,
+    )
+    rulings = _serialize_ruling_rows(conn, rows, current_rules_version)
+
+    return {
+        "rule_id": normalized_id,
+        "rule_found": rule_found,
+        "current_rules_version": current_rules_version,
+        "include_superseded": include_superseded,
+        "include_children": include_children,
+        "matched_rule_ids": matched_rule_ids,
+        "total": len(rulings),
+        "rulings": rulings,
+    }
+
+
+def get_cards(
+    conn: sqlite3.Connection,
+    card_ids: Sequence[str],
+    *,
+    include_rulings: bool = False,
+    include_superseded: bool = False,
+    page: int = 1,
+    page_size: int = DEFAULT_BATCH_CARDS_PAGE_SIZE,
+) -> dict[str, Any]:
+    """Batch look up canonical cards by card_id with pagination, banlist legality, and rulings."""
+    if isinstance(card_ids, str):
+        raise ValueError("card_ids must be a sequence of canonical card IDs, not a string")
+    if page <= 0:
+        raise ValueError("page must be a positive integer (>= 1)")
+    if page_size <= 0:
+        raise ValueError("page_size must be a positive integer (>= 1)")
+
+    effective_page_size = min(page_size, MAX_BATCH_CARDS_PAGE_SIZE)
+
+    deduped_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in card_ids:
+        cleaned = str(raw).strip().upper()
+        if not cleaned:
+            continue
+        if cleaned not in seen:
+            seen.add(cleaned)
+            deduped_ids.append(cleaned)
+
+    if not deduped_ids:
+        raise ValueError("card_ids must contain at least one non-empty card_id")
+
+    total_requested = len(deduped_ids)
+    total_pages = max(1, (total_requested + effective_page_size - 1) // effective_page_size)
+    start_idx = (page - 1) * effective_page_size
+    end_idx = start_idx + effective_page_size
+    page_ids = deduped_ids[start_idx:end_idx]
+    has_more = end_idx < total_requested
+    next_page = page + 1 if has_more else None
+
+    meta = _banlist_meta(conn)
+    current_rules_version = get_meta(conn, "rules_version")
+
+    if not page_ids:
+        return {
+            "requested_ids": [],
+            "total_requested": total_requested,
+            "page": page,
+            "page_size": effective_page_size,
+            "total_pages": total_pages,
+            "has_more": False,
+            "next_page": None,
+            "found": 0,
+            "not_found": [],
+            "include_rulings": include_rulings,
+            "include_superseded": include_superseded,
+            "current_rules_version": current_rules_version,
+            **meta,
+            "cards": [],
+        }
+
+    placeholders = ", ".join("?" for _ in page_ids)
+    card_rows = conn.execute(
+        f"SELECT * FROM cards WHERE UPPER(card_id) IN ({placeholders})",
+        page_ids,
+    ).fetchall()
+    rows_by_id = {str(row["card_id"]).upper(): row for row in card_rows}
+
+    found_ids = [cid for cid in page_ids if cid in rows_by_id]
+    not_found = [cid for cid in page_ids if cid not in rows_by_id]
+
+    restrictions = _load_restrictions_by_card_id(conn, found_ids, scope="active")
+    upcoming = _load_restrictions_by_card_id(conn, found_ids, scope="upcoming")
+
+    rulings_by_card: dict[str, list[dict[str, Any]]] = {cid: [] for cid in found_ids}
+    if include_rulings and found_ids:
+        superseded_clause = "" if include_superseded else "AND r.superseded_by IS NULL"
+        found_placeholders = ", ".join("?" for _ in found_ids)
+        ruling_rows = conn.execute(
+            f"""
+            SELECT
+                UPPER(rc.card_id) AS matched_card_id,
+                r.ruling_id,
+                r.question,
+                r.answer,
+                r.source,
+                r.authority,
+                r.judge_tier,
+                r.date,
+                r.rules_version,
+                r.url,
+                r.superseded_by,
+                r.reviewed
+            FROM rulings r
+            JOIN ruling_cards rc ON rc.ruling_id = r.ruling_id
+            WHERE UPPER(rc.card_id) IN ({found_placeholders})
+              {superseded_clause}
+            ORDER BY
+                r.authority ASC,
+                CASE r.judge_tier
+                    WHEN 'tier_0' THEN 1
+                    WHEN 'tier_2' THEN 2
+                    WHEN 'tier_1' THEN 3
+                    ELSE 4
+                END ASC,
+                COALESCE(r.date, '') DESC,
+                r.ruling_id ASC
+            """,
+            found_ids,
+        ).fetchall()
+
+        serialized_by_id = {
+            item["ruling_id"]: item
+            for item in _serialize_ruling_rows(conn, ruling_rows, current_rules_version)
+        }
+        for r_row in ruling_rows:
+            cid = str(r_row["matched_card_id"])
+            rid = str(r_row["ruling_id"])
+            if cid in rulings_by_card and rid in serialized_by_id:
+                rulings_by_card[cid].append(serialized_by_id[rid])
+
+    cards: list[dict[str, Any]] = []
+    for cid in found_ids:
+        card_payload = _serialize_card_row(
+            rows_by_id[cid],
+            restrictions.get(cid),
+            upcoming.get(cid),
+        )
+        if include_rulings:
+            card_payload["rulings"] = rulings_by_card.get(cid, [])
+        cards.append(card_payload)
+
+    return {
+        "requested_ids": page_ids,
+        "total_requested": total_requested,
+        "page": page,
+        "page_size": effective_page_size,
+        "total_pages": total_pages,
+        "has_more": has_more,
+        "next_page": next_page,
+        "found": len(cards),
+        "not_found": not_found,
+        "include_rulings": include_rulings,
+        "include_superseded": include_superseded,
+        "current_rules_version": current_rules_version,
+        **meta,
+        "cards": cards,
     }
 
 
