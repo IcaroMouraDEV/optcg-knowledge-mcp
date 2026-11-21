@@ -1,5 +1,22 @@
 """Hybrid retrieval and structured query functions for optcg-knowledge."""
 
+from optcg_knowledge.search.eval import (
+    DEFAULT_EVAL_DATASET_PATH,
+    EVAL_SCHEMA_VERSION,
+    AssertionOutcome,
+    AuthorityAssertion,
+    CaseEvalResult,
+    EvalCase,
+    EvalDataset,
+    EvalDatasetError,
+    EvalReport,
+    EvalTarget,
+    MetricSlice,
+    ModeEvalSummary,
+    load_eval_dataset,
+    parse_eval_dataset,
+    run_retrieval_eval,
+)
 from optcg_knowledge.search.hybrid import hybrid_search
 from optcg_knowledge.search.queries import (
     get_banlist,
@@ -19,7 +36,19 @@ from optcg_knowledge.search.query_parser import (
 )
 
 __all__ = [
+    "AssertionOutcome",
+    "AuthorityAssertion",
+    "CaseEvalResult",
+    "DEFAULT_EVAL_DATASET_PATH",
     "DetectedTokens",
+    "EVAL_SCHEMA_VERSION",
+    "EvalCase",
+    "EvalDataset",
+    "EvalDatasetError",
+    "EvalReport",
+    "EvalTarget",
+    "MetricSlice",
+    "ModeEvalSummary",
     "build_fts_queries",
     "detect_query_tokens",
     "get_banlist",
@@ -31,5 +60,8 @@ __all__ = [
     "get_status",
     "get_trm_section",
     "hybrid_search",
+    "load_eval_dataset",
+    "parse_eval_dataset",
+    "run_retrieval_eval",
     "search_cards",
 ]

@@ -1,0 +1,367 @@
+{
+  "schema_version": "1.0",
+  "name": "optcg-ptbr-en-retrieval-v1",
+  "description": "Curated bilingual (PT-BR + EN) OPTCG judge and player retrieval benchmark targeting canonical Comprehensive Rules, TRM sections, cards, and official FAQs. Contains zero Bandai copyrighted text and zero PII.",
+  "cases": [
+    {
+      "case_id": "blocker-once-per-battle-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "Como funciona o efeito [Blocker] e posso bloquear mais de uma vez na mesma batalha?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-4", "match_prefix": true},
+        {"doc_type": "rule", "doc_id": "7-1-2", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "blocker-once-per-battle-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "How does [Blocker] work and can I activate [Blocker] more than once during the same battle?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-4", "match_prefix": true},
+        {"doc_type": "rule", "doc_id": "7-1-2", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "rush-same-turn-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "Um Character com [Rush] pode atacar no mesmo turno em que foi jogado?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "rush-same-turn-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "Can a Character with [Rush] attack on the same turn it is played?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "double-attack-damage-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "Como funciona [Double Attack] quando o ataque causa dano no Leader do oponente?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-2", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "double-attack-damage-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "How does [Double Attack] work when dealing damage to the opponent Leader's Life?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-2", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "banish-life-trash-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "Quando um ataque com [Banish] causa dano ao Leader, a carta de Life vai para o trash sem ativar [Trigger]?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-3", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "banish-life-trash-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "When an attack with [Banish] deals damage to the opponent Leader's Life, is the Life card trashed without [Trigger]?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-3", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "trigger-optional-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "Sou obrigado a ativar o [Trigger] de uma carta de Life ou posso apenas adicioná-la à mão?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-5", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "trigger-optional-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "Can I choose not to activate [Trigger] from a Life card and add it to my hand without revealing it?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-5", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "counter-step-order-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "Na Counter Step, posso descartar Characters com Counter e usar Events [Counter] em qualquer ordem?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "7-1-3", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "counter-step-order-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "During the Counter Step, can the defending player activate Counter Characters and [Counter] Event cards in any order?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "7-1-3", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "damage-step-exact-rule-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "O que diz a regra 7-1-4-1 na Damage Step quando o poder do atacante é igual ou maior e o Leader tem 0 Life?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "7-1-4-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top1_max_authority", "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "damage-step-exact-rule-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "What does rule 7-1-4-1 state during the Damage Step when the attacking power is greater than or equal to the Leader?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "7-1-4-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top1_max_authority", "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "simultaneous-effects-priority-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "Quando efeitos do jogador do turno e do oponente ativam ao mesmo tempo, qual resolve primeiro?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "8-6", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "simultaneous-effects-priority-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "When effects of both the turn player and non-turn player fulfill their activation timing at the same time, what is the order of resolution?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "8-6", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "replacement-effects-instead-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "Como funcionam efeitos de substituição (replacement effects) com a palavra instead quando mais de um se aplica?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "8-1-3-4", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "replacement-effects-instead-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "How do replacement effects denoted by the word instead work when multiple replacement effects could apply?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "8-1-3-4", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "first-turn-draw-and-don-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "No primeiro turno do jogo, o jogador que vai primeiro compra carta na Draw Phase e quantos DON!! coloca na DON!! Phase?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "6-3-1"},
+        {"doc_type": "rule", "doc_id": "6-4-1"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "first-turn-draw-and-don-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "Does the player going first draw a card in the Draw Phase and how many DON!! cards do they place during the DON!! Phase?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "6-3-1"},
+        {"doc_type": "rule", "doc_id": "6-4-1"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "infinite-loops-draw-pt",
+      "lang": "pt-BR",
+      "category": "rules",
+      "query": "O que acontece em um loop infinito se nenhum dos jogadores puder parar o loop?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "11-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "infinite-loops-draw-en",
+      "lang": "en",
+      "category": "rules",
+      "query": "What happens in an infinite loop if neither player can stop the loop?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "11-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "trm-slow-play-pt",
+      "lang": "pt-BR",
+      "category": "trm",
+      "query": "Qual é a regra e penalidade no Tournament Rules Manual para Slow Play (jogo lento)?",
+      "expected_targets": [
+        {"doc_type": "tournament_rule", "doc_id": "TRM-7.4.2.3"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "trm-slow-play-exact-en",
+      "lang": "en",
+      "category": "trm",
+      "query": "What does TRM-7.4.2.3 say about Slow Play penalties in tournaments?",
+      "expected_targets": [
+        {"doc_type": "tournament_rule", "doc_id": "TRM-7.4.2.3"}
+      ],
+      "authority_checks": [
+        {"type": "top1_max_authority", "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "trm-intentional-draws-pt",
+      "lang": "pt-BR",
+      "category": "trm",
+      "query": "Empates intencionais (Intentional Draws) são permitidos pelo Tournament Rules Manual?",
+      "expected_targets": [
+        {"doc_type": "tournament_rule", "doc_id": "TRM-4.18"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "trm-appeals-head-judge-en",
+      "lang": "en",
+      "category": "trm",
+      "query": "How do player appeals to the Head Judge work according to the Tournament Rules Manual?",
+      "expected_targets": [
+        {"doc_type": "tournament_rule", "doc_id": "TRM-4.14"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "card-exact-op05-119-pt",
+      "lang": "pt-BR",
+      "category": "cards",
+      "query": "Qual é o efeito completo da carta OP05-119 Monkey.D.Luffy?",
+      "expected_targets": [
+        {"doc_type": "card", "doc_id": "OP05-119"}
+      ]
+    },
+    {
+      "case_id": "card-exact-op06-086-en",
+      "lang": "en",
+      "category": "cards",
+      "query": "What is the [On Play] effect of OP06-086 Gecko Moria?",
+      "expected_targets": [
+        {"doc_type": "card", "doc_id": "OP06-086"}
+      ]
+    },
+    {
+      "case_id": "mixed-op04-083-sabo-faq-pt",
+      "lang": "pt-BR",
+      "category": "mixed",
+      "query": "OP04-083 Sabo: personagens jogados depois do efeito [On Play] também não podem ser dados K.O. por efeitos?",
+      "expected_targets": [
+        {"doc_type": "card", "doc_id": "OP04-083"},
+        {"doc_type": "ruling", "doc_id": "faq:OP04-083:", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 5, "max_authority": 2}
+      ]
+    },
+    {
+      "case_id": "mixed-op09-093-teach-faq-en",
+      "lang": "en",
+      "category": "mixed",
+      "query": "OP09-093 Marshall.D.Teach: if a Character with negated effects is K.O.'d, can its [On K.O.] effect activate?",
+      "expected_targets": [
+        {"doc_type": "card", "doc_id": "OP09-093"},
+        {"doc_type": "ruling", "doc_id": "faq:OP09-093:", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 5, "max_authority": 2}
+      ]
+    }
+  ]
+}

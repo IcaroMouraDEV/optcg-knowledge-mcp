@@ -31,6 +31,12 @@ from optcg_knowledge.ingest.official_downloader import (
 from optcg_knowledge.ingest.rules_parser import ingest_rules, parse_rules_pdf
 from optcg_knowledge.ingest.sources import CardSource, LocalCardSource, PunkRecordsSource
 from optcg_knowledge.ingest.trm_parser import ingest_trm, parse_trm_pdf
+from optcg_knowledge.search.eval import (
+    DEFAULT_EVAL_DATASET_PATH,
+    EvalDatasetError,
+    load_eval_dataset,
+    run_retrieval_eval,
+)
 from optcg_knowledge.search.queries import get_status
 from optcg_knowledge.sync import run_sync
 
@@ -656,6 +662,89 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Rulings JSON file or directory (defaults to data/rulings).",
     )
 
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help=(
+            "Run the bilingual (PT-BR/EN) retrieval evaluation benchmark reporting "
+            "Recall@3, Recall@8, MRR, and authority assertions."
+        ),
+    )
+    eval_parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=DEFAULT_EVAL_DATASET_PATH,
+        help=f"Path to benchmark dataset JSON (default: {DEFAULT_EVAL_DATASET_PATH}).",
+    )
+    eval_parser.add_argument(
+        "--mode",
+        choices=("lexical", "hybrid", "both"),
+        default="both",
+        help="Evaluation mode: lexical (FTS5/exact), hybrid (FTS5+vector), or both (default).",
+    )
+    eval_parser.add_argument(
+        "--k",
+        type=int,
+        default=8,
+        help="Top-k retrieval cutoff per query (minimum 8, default: 8).",
+    )
+    eval_parser.add_argument(
+        "--lang",
+        choices=("all", "pt-BR", "en"),
+        default="all",
+        help="Filter benchmark cases by language (default: all).",
+    )
+    eval_parser.add_argument(
+        "--device",
+        default=None,
+        help="Device for local embeddings in hybrid mode: auto, cuda, cpu (default: auto).",
+    )
+    eval_parser.add_argument(
+        "--fp16",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use FP16 weights on CUDA in hybrid mode (default: enabled).",
+    )
+    eval_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Batch size passed to local embedder (default: OPTCG_EMBEDDING_BATCH_SIZE or 8).",
+    )
+    eval_parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Print machine-readable JSON evaluation report to stdout.",
+    )
+    eval_parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional file path to write the JSON evaluation report.",
+    )
+    eval_parser.add_argument(
+        "--verbose-cases",
+        action="store_true",
+        help="Include per-case Recall, rank, and assertion failures in text output.",
+    )
+    eval_parser.add_argument(
+        "--min-recall3",
+        type=float,
+        default=None,
+        help="Fail with exit code 1 if evaluated Recall@3 is below this threshold (0.0..1.0).",
+    )
+    eval_parser.add_argument(
+        "--min-mrr",
+        type=float,
+        default=None,
+        help="Fail with exit code 1 if evaluated MRR is below this threshold (0.0..1.0).",
+    )
+    eval_parser.add_argument(
+        "--fail-on-authority",
+        action="store_true",
+        help="Fail with exit code 1 if any authority assertion fails.",
+    )
+
     return parser
 
 
@@ -1034,6 +1123,86 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"warnings={len(summary.warnings)})"
         )
         return 0
+
+    if args.command == "eval":
+        try:
+            dataset = load_eval_dataset(args.dataset)
+        except (EvalDatasetError, FileNotFoundError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
+        is_memory = str(settings.db_path) == ":memory:"
+        if not is_memory and not settings.db_path.exists():
+            print(
+                f"Database not found at {settings.db_path}. "
+                "Run `optcg-ingest sync` to initialize and populate it.",
+                file=sys.stderr,
+            )
+            return 1
+
+        eval_embedder = _create_embedder(settings) if args.mode in ("hybrid", "both") else None
+        lang_filter = None if args.lang == "all" else args.lang
+
+        try:
+            with open_db(settings.db_path, init=False) as conn:
+                report = run_retrieval_eval(
+                    conn,
+                    dataset.cases,
+                    mode=args.mode,
+                    embedder=eval_embedder,
+                    k=args.k,
+                    lang=lang_filter,
+                    dataset_name=dataset.name,
+                    dataset_path=args.dataset,
+                )
+        except (RuntimeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
+        json_text = json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(f"{json_text}\n", encoding="utf-8")
+
+        if args.as_json:
+            print(json_text)
+        else:
+            print(report.format_text(verbose_cases=args.verbose_cases))
+
+        # Select primary mode for optional threshold gates: hybrid if evaluated, else lexical.
+        primary_summary = report.modes.get("hybrid") or report.modes.get("lexical")
+        gate_failed = False
+        if primary_summary is not None:
+            if (
+                args.min_recall3 is not None
+                and primary_summary.metrics.recall_at_3 < args.min_recall3
+            ):
+                print(
+                    f"Gate failed ({primary_summary.mode}): "
+                    f"Recall@3 {primary_summary.metrics.recall_at_3:.4f} < {args.min_recall3:.4f}",
+                    file=sys.stderr,
+                )
+                gate_failed = True
+            if args.min_mrr is not None and primary_summary.metrics.mrr < args.min_mrr:
+                print(
+                    f"Gate failed ({primary_summary.mode}): "
+                    f"MRR {primary_summary.metrics.mrr:.4f} < {args.min_mrr:.4f}",
+                    file=sys.stderr,
+                )
+                gate_failed = True
+            if (
+                args.fail_on_authority
+                and primary_summary.metrics.authority_checks_passed
+                < primary_summary.metrics.authority_checks_total
+            ):
+                print(
+                    f"Gate failed ({primary_summary.mode}): "
+                    f"authority checks {primary_summary.metrics.authority_checks_passed}/"
+                    f"{primary_summary.metrics.authority_checks_total}",
+                    file=sys.stderr,
+                )
+                gate_failed = True
+        return 1 if gate_failed else 0
 
     parser.error(f"Unsupported command: {args.command}")
     return 2
