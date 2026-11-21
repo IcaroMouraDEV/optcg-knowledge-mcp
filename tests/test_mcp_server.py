@@ -21,7 +21,7 @@ from optcg_knowledge.ingest import (
     parse_trm_text,
 )
 from optcg_knowledge.mcp import create_server
-from optcg_knowledge.search.queries import MAX_BATCH_CARDS_PAGE_SIZE, get_cards
+from optcg_knowledge.search.queries import MAX_BATCH_CARDS_PAGE_SIZE, get_cards, search_cards
 
 
 def _extract_json_payload(call_result: Any) -> dict[str, Any]:
@@ -183,6 +183,7 @@ def test_mcp_query_tools_contracts_and_zero_stdout_leak(
     assert out["card_by_id"]["match_type"] == "exact_id"
     assert out["card_by_id"]["total"] == 1
     assert out["card_by_id"]["cards"][0]["card_id"] == "OP05-119"
+    assert out["card_by_id"]["cards"][0]["block_icon"] == 3
     assert out["card_by_id"]["cards"][0]["variant_count"] == 2
     assert "raw_json" not in out["card_by_id"]["cards"][0]
 
@@ -227,6 +228,8 @@ def test_mcp_query_tools_contracts_and_zero_stdout_leak(
     assert "get_banlist" in prompt_text
     assert "tournament_rules" in prompt_text
     assert "ban_status" in prompt_text
+    assert "block_icon" in prompt_text
+    assert "min_block" in prompt_text
     assert "paired_card_ids" in prompt_text
     assert "potentially_outdated" in prompt_text
     assert "optcg-engine" in prompt_text
@@ -476,7 +479,7 @@ def test_mcp_get_status_contract_and_zero_stdout_leak(
     status = asyncio.run(_run())
     assert capsys.readouterr().out == ""
 
-    assert status["schema_version"] == "5"
+    assert status["schema_version"] == "6"
     assert status["rules_version"] == "1.24"
     assert status["banlist_loaded"] is True
     assert status["banlist_effective_date"] == "2026-10-12"
@@ -923,7 +926,99 @@ Resolution: Carry out the mandatory effect from the closest checkpoint.
 
     assert out["res_card"]["match_type"] == "exact_id"
     assert out["res_card"]["cards"][0]["card_id"] == "OP05-119"
+    assert out["res_card"]["cards"][0]["block_icon"] == 3
     assert out["res_card"]["cards"][0]["ban_status"] == "legal"
     assert out["res_card"]["cards"][0]["upcoming_restriction"]["ban_status"] == "pair_banned"
     assert out["res_card_missing"]["match_type"] == "not_found"
     assert out["res_card_missing"]["cards"] == []
+
+
+def test_mcp_block_icon_surfacing_and_search_cards_filtering_zero_stdout_leak(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, embedder = populated_db
+    banlist_doc, _ = parse_banlist_json(
+        {
+            "effective_date": "2026-10-12",
+            "restrictions": [
+                {"card_id": "OP01-001", "ban_status": "banned"},
+                {"card_id": "ST10-001", "ban_status": "restricted"},
+            ],
+        }
+    )
+    ingest_banlist(conn, banlist_doc)
+
+    server = create_server(db_path=db_path, embedder=embedder)
+
+    async def _run() -> dict[str, Any]:
+        card_promo = _extract_json_payload(
+            await server.call_tool("get_card", {"id_or_name": "P-001"})
+        )
+        batch_cards = _extract_json_payload(
+            await server.call_tool("get_cards", {"card_ids": ["OP05-119", "ST10-001", "P-001"]})
+        )
+        banlist = _extract_json_payload(await server.call_tool("get_banlist", {}))
+        block_1 = _extract_json_payload(
+            await server.call_tool("search_cards", {"block_icon": 1})
+        )
+        block_2 = _extract_json_payload(
+            await server.call_tool("search_cards", {"block_icon": 2})
+        )
+        min_block_2 = _extract_json_payload(
+            await server.call_tool("search_cards", {"min_block": 2})
+        )
+        min_block_2_legal = _extract_json_payload(
+            await server.call_tool("search_cards", {"min_block": 2, "ban_status": "legal"})
+        )
+        return {
+            "card_promo": card_promo,
+            "batch_cards": batch_cards,
+            "banlist": banlist,
+            "block_1": block_1,
+            "block_2": block_2,
+            "min_block_2": min_block_2,
+            "min_block_2_legal": min_block_2_legal,
+        }
+
+    out = asyncio.run(_run())
+    assert capsys.readouterr().out == ""
+
+    # Nullable block_icon preserved cleanly on get_card and get_cards.
+    assert out["card_promo"]["cards"][0]["block_icon"] is None
+    assert [(c["card_id"], c["block_icon"]) for c in out["batch_cards"]["cards"]] == [
+        ("OP05-119", 3),
+        ("ST10-001", 2),
+        ("P-001", None),
+    ]
+
+    # get_banlist surfaces joined card block_icon alongside restriction metadata.
+    banlist_blocks = {r["card_id"]: r["block_icon"] for r in out["banlist"]["restrictions"]}
+    assert banlist_blocks == {"OP01-001": 1, "ST10-001": 2}
+
+    # Exact block_icon and Standard rotation min_block filters exclude NULL block_icon cards.
+    assert out["block_1"]["filters"]["block_icon"] == 1
+    assert out["block_1"]["filters"]["min_block"] is None
+    assert [c["card_id"] for c in out["block_1"]["cards"]] == [
+        "OP01-001",
+        "OP02-106",
+        "OP04-083",
+        "ST01-014",
+    ]
+    assert [c["card_id"] for c in out["block_2"]["cards"]] == ["ST10-001"]
+
+    assert out["min_block_2"]["filters"]["min_block"] == 2
+    assert [c["card_id"] for c in out["min_block_2"]["cards"]] == ["OP05-119", "ST10-001"]
+
+    # Combining min_block with ban_status isolates Standard-legal unrestricted cards.
+    assert [c["card_id"] for c in out["min_block_2_legal"]["cards"]] == ["OP05-119"]
+
+    # Query-layer input validation rejects non-positive or boolean block filters.
+    with pytest.raises(ValueError, match="block_icon must be a positive integer"):
+        search_cards(conn, block_icon=0)
+    with pytest.raises(ValueError, match="block_icon must be a positive integer"):
+        search_cards(conn, block_icon=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="min_block must be a positive integer"):
+        search_cards(conn, min_block=0)
+    with pytest.raises(ValueError, match="min_block must be a positive integer"):
+        search_cards(conn, min_block=False)  # type: ignore[arg-type]

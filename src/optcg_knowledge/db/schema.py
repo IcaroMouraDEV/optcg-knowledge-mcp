@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 
-SCHEMA_VERSION = "5"
+from optcg_knowledge.db.models import extract_block_icon_from_raw
+
+SCHEMA_VERSION = "6"
 
 TRM_SECTIONS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS trm_sections (
@@ -76,6 +79,7 @@ CREATE TABLE IF NOT EXISTS cards (
     effect_text TEXT,
     trigger_text TEXT,
     rarity TEXT,
+    block_icon INTEGER CHECK (block_icon IS NULL OR block_icon >= 1),
     image_url TEXT,
     raw_json TEXT NOT NULL
 );
@@ -83,6 +87,7 @@ CREATE TABLE IF NOT EXISTS cards (
 CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_cards_set_code ON cards(set_code);
 CREATE INDEX IF NOT EXISTS idx_cards_category ON cards(category);
+CREATE INDEX IF NOT EXISTS idx_cards_block_icon ON cards(block_icon);
 
 CREATE TABLE IF NOT EXISTS card_restrictions (
     card_id TEXT NOT NULL,
@@ -437,6 +442,42 @@ def migrate_schema(conn: sqlite3.Connection) -> bool:
         if has_fts is not None:
             conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
         migrated = True
+
+    has_cards = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cards'"
+    ).fetchone()
+    if has_cards is not None:
+        card_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(cards)").fetchall()
+        }
+        if "block_icon" not in card_columns:
+            conn.execute(
+                """
+                ALTER TABLE cards
+                ADD COLUMN block_icon INTEGER
+                CHECK (block_icon IS NULL OR block_icon >= 1)
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_block_icon ON cards(block_icon)")
+            backfill_rows: list[tuple[int, str]] = []
+            for card_row in conn.execute("SELECT card_id, raw_json FROM cards").fetchall():
+                raw_json_str = card_row[1]
+                if not raw_json_str:
+                    continue
+                try:
+                    parsed_raw = json.loads(raw_json_str)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed_raw, dict):
+                    block_val = extract_block_icon_from_raw(parsed_raw)
+                    if block_val is not None:
+                        backfill_rows.append((block_val, str(card_row[0])))
+            if backfill_rows:
+                conn.executemany(
+                    "UPDATE cards SET block_icon = ? WHERE card_id = ?",
+                    backfill_rows,
+                )
+            migrated = True
 
     if migrated or get_meta(conn, "schema_version") != SCHEMA_VERSION:
         set_meta(conn, "schema_version", SCHEMA_VERSION)

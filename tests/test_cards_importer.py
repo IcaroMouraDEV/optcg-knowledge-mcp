@@ -31,16 +31,19 @@ def test_normalize_cards_deduplicates_parallels_and_maps_leader_life(
 
     by_id = {card.card_id: card for card in cards}
 
-    # OP05-119 prefers base printing over _p1 even though _p1 appeared first in JSON.
+    # OP05-119 prefers base printing over _p1 even though _p1 appeared first in JSON,
+    # while promoting block_icon to the highest printing block across variants (3 > 1).
     luffy = by_id["OP05-119"]
     assert luffy.set_code == "OP05"
     assert luffy.cost == 10
     assert luffy.life is None
     assert luffy.power == 12000
+    assert luffy.block_icon == 3
     assert luffy.image_url == "https://en.onepiece-cardgame.com/images/cardlist/card/OP05-119.png"
     assert "variants" in luffy.raw_json
     assert len(luffy.raw_json["variants"]) == 1
     assert luffy.raw_json["variants"][0]["id"] == "OP05-119_p1"
+    assert luffy.raw_json["variants"][0]["block_icon"] == 3
 
     # Leaders convert vegapull's `cost` field into `life` and leave `cost` None.
     zoro = by_id["OP01-001"]
@@ -48,24 +51,28 @@ def test_normalize_cards_deduplicates_parallels_and_maps_leader_life(
     assert zoro.life == 5
     assert zoro.cost is None
     assert zoro.colors == ("Red",)
+    assert zoro.block_icon == 1
 
     law = by_id["ST10-001"]
     assert law.set_code == "ST10"
     assert law.life == 4
     assert law.cost is None
     assert law.colors == ("Red", "Purple")
+    assert law.block_icon == 2
 
     # Events keep both effect_text and trigger_text.
     guard = by_id["ST01-014"]
     assert guard.category == "Event"
     assert guard.cost == 1
+    assert guard.block_icon == 1
     assert guard.effect_text is not None and "[Counter]" in guard.effect_text
     assert guard.trigger_text is not None and "[Trigger]" in guard.trigger_text
 
-    # Promos derive set_code = "P".
+    # Promos derive set_code = "P" and allow null block_icon.
     promo = by_id["P-001"]
     assert promo.set_code == "P"
     assert promo.rarity == "Promo"
+    assert promo.block_icon is None
 
 
 def test_local_source_directory_ignores_metadata_and_index(
@@ -154,12 +161,44 @@ def test_ingest_cards_chunks_and_idempotency(
     assert fts_count == 5
 
     chunk = db_conn.execute(
-        "SELECT text FROM chunks WHERE chunk_id = 'card:ST01-014'"
+        "SELECT text, metadata FROM chunks WHERE chunk_id = 'card:ST01-014'"
     ).fetchone()
     assert chunk is not None
     assert "ST01-014 — Guard Point" in chunk["text"]
     assert "[Counter]" in chunk["text"]
     assert "[Trigger]" in chunk["text"]
+    assert "Block:" not in chunk["text"]
+    assert json.loads(chunk["metadata"])["block_icon"] == 1
+
+    persisted_blocks = {
+        str(r["card_id"]): r["block_icon"]
+        for r in db_conn.execute("SELECT card_id, block_icon FROM cards").fetchall()
+    }
+    assert persisted_blocks == {
+        "OP01-001": 1,
+        "OP05-119": 3,
+        "P-001": None,
+        "ST01-014": 1,
+        "ST10-001": 2,
+    }
 
     assert get_meta(db_conn, "cards_source") is not None
     db_conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
+
+
+def test_normalize_cards_handles_local_block_icon_aliases_and_invalid_values() -> None:
+    cards, _ = normalize_cards(
+        [
+            {"card_id": "OP09-001", "name": "Shanks", "category": "Leader", "block_icon": "3"},
+            {"card_id": "OP10-001", "name": "Smoker", "category": "Leader", "block": 4},
+            {"card_id": "OP11-001", "name": "Koby", "category": "Leader", "block_number": "-"},
+            {"card_id": "OP12-001", "name": "Zero", "category": "Leader", "block_number": 0},
+            {"card_id": "OP13-001", "name": "Bool", "category": "Leader", "block_icon": True},
+        ]
+    )
+    by_id = {card.card_id: card for card in cards}
+    assert by_id["OP09-001"].block_icon == 3
+    assert by_id["OP10-001"].block_icon == 4
+    assert by_id["OP11-001"].block_icon is None
+    assert by_id["OP12-001"].block_icon is None
+    assert by_id["OP13-001"].block_icon is None
