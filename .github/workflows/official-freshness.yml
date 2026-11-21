@@ -1,0 +1,63 @@
+name: Official Document Freshness
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: official-freshness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-official:
+    name: Check Bandai Official Document Revisions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install core and dev dependencies (no ML extras)
+        run: uv sync --frozen --dev
+
+      - name: Inspect Bandai official document revisions (text-only)
+        run: |
+          uv run --no-sync optcg-ingest check-official \
+            --baseline data/official_revisions.json \
+            --json-out "$RUNNER_TEMP/freshness.json" \
+            --markdown-out "$RUNNER_TEMP/freshness.md"
+          cat "$RUNNER_TEMP/freshness.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create, update, or close single tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: "[Official Update] Bandai OPTCG document revisions detected"
+        run: |
+          UP_TO_DATE="$(python3 -c 'import json, os, pathlib; p = pathlib.Path(os.environ["RUNNER_TEMP"]) / "freshness.json"; print("true" if json.loads(p.read_text(encoding="utf-8"))["up_to_date"] else "false")')"
+          EXISTING_NUMBER="$(gh issue list --state open --search "\"$ISSUE_TITLE\" in:title" --json number,title --jq '.[] | select(.title == env.ISSUE_TITLE) | .number' | head -n 1)"
+
+          if [ "$UP_TO_DATE" = "false" ]; then
+            if [ -n "$EXISTING_NUMBER" ]; then
+              gh issue edit "$EXISTING_NUMBER" --body-file "$RUNNER_TEMP/freshness.md"
+              echo "Updated existing tracking issue #$EXISTING_NUMBER"
+            else
+              gh issue create --title "$ISSUE_TITLE" --body-file "$RUNNER_TEMP/freshness.md"
+              echo "Created new tracking issue for official Bandai document updates"
+            fi
+          elif [ -n "$EXISTING_NUMBER" ]; then
+            gh issue close "$EXISTING_NUMBER" --comment "Tracked baseline \`data/official_revisions.json\` is now up to date with Bandai's official English pages."
+            echo "Closed resolved tracking issue #$EXISTING_NUMBER"
+          else
+            echo "Official Bandai documents are up to date; no open tracking issue."
+          fi

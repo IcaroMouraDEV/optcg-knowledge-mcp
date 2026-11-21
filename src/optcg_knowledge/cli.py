@@ -24,6 +24,8 @@ from optcg_knowledge.ingest.embeddings import Embedder, SentenceTransformerEmbed
 from optcg_knowledge.ingest.faq_parser import ingest_faqs, parse_faq_path
 from optcg_knowledge.ingest.official_downloader import (
     DEFAULT_OFFICIAL_BASE_URL,
+    DEFAULT_OFFICIAL_BASELINE_PATH,
+    check_official_freshness,
     fetch_official_docs,
 )
 from optcg_knowledge.ingest.rules_parser import ingest_rules, parse_rules_pdf
@@ -351,6 +353,68 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Re-download files even if they already match the saved revision manifest.",
+    )
+
+    check_parser = subparsers.add_parser(
+        "check-official",
+        help=(
+            "Inspect live Bandai official document revisions and SHA-256 semantic fingerprints "
+            "without downloading PDFs or images, comparing against a tracked baseline JSON."
+        ),
+    )
+    check_parser.add_argument(
+        "--only",
+        choices=("all", "rules", "trm", "faq", "errata", "banlist"),
+        default="all",
+        help="Inspect only a subset of official documents (default: all).",
+    )
+    check_parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=DEFAULT_OFFICIAL_BASELINE_PATH,
+        help=(
+            "Path to tracked official revisions baseline JSON "
+            f"(default: {DEFAULT_OFFICIAL_BASELINE_PATH})."
+        ),
+    )
+    check_parser.add_argument(
+        "--base-url",
+        default=DEFAULT_OFFICIAL_BASE_URL,
+        help=f"Official site base URL (default: {DEFAULT_OFFICIAL_BASE_URL}).",
+    )
+    check_parser.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help="Write or update the baseline JSON file with the detected live revisions.",
+    )
+    check_parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Print machine-readable JSON freshness report to stdout.",
+    )
+    check_parser.add_argument(
+        "--markdown",
+        dest="as_markdown",
+        action="store_true",
+        help="Print GitHub-flavored Markdown freshness report to stdout.",
+    )
+    check_parser.add_argument(
+        "--json-out",
+        type=Path,
+        default=None,
+        help="Optional file path to write the JSON freshness report.",
+    )
+    check_parser.add_argument(
+        "--markdown-out",
+        type=Path,
+        default=None,
+        help="Optional file path to write the Markdown freshness report.",
+    )
+    check_parser.add_argument(
+        "--fail-on-diff",
+        action="store_true",
+        help="Return exit code 1 if any document was added, updated, or removed.",
     )
 
     rules_parser = subparsers.add_parser(
@@ -704,6 +768,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"faq={summary.faq_files}, errata={summary.errata_files}, "
             f"banlist={summary.banlist_files})"
         )
+        return 0
+
+    if args.command == "check-official":
+        report = check_official_freshness(
+            args.baseline,
+            only=args.only,
+            base_url=args.base_url,
+            write_baseline=args.write_baseline,
+        )
+        json_text = json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
+        markdown_text = report.to_markdown()
+
+        if args.json_out is not None:
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(f"{json_text}\n", encoding="utf-8")
+        if args.markdown_out is not None:
+            args.markdown_out.parent.mkdir(parents=True, exist_ok=True)
+            args.markdown_out.write_text(f"{markdown_text}\n", encoding="utf-8")
+
+        if args.as_json:
+            print(json_text)
+        elif args.as_markdown:
+            print(markdown_text)
+        else:
+            status_label = "up-to-date" if report.up_to_date else "updates-detected"
+            baseline_note = (
+                f", baseline_written={report.baseline_path}" if report.baseline_updated else ""
+            )
+            print(
+                f"Official Bandai docs check: {status_label} "
+                f"(checked={report.checked_count}, unchanged={report.unchanged_count}, "
+                f"added={len(report.added)}, updated={len(report.updated)}, "
+                f"removed={len(report.removed)}{baseline_note})"
+            )
+            for diff in (*report.added, *report.updated, *report.removed):
+                prev_rev = diff.previous.revision if diff.previous is not None else "-"
+                curr_rev = diff.current.revision if diff.current is not None else "-"
+                print(f"  [{diff.change_type.upper()}] {diff.key}: {prev_rev} -> {curr_rev}")
+
+        if args.fail_on_diff and not report.up_to_date:
+            return 1
         return 0
 
     if args.command == "rules":

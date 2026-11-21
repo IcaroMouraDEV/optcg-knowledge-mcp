@@ -83,6 +83,13 @@ uv run optcg-ingest fetch-official
 # Or fetch only one category: --only rules | trm | faq | errata | banlist
 ```
 
+To inspect live Bandai pages for new revisions without downloading PDFs or images (comparing against the tracked `data/official_revisions.json` baseline used by the weekly GitHub Actions freshness workflow):
+```bash
+uv run optcg-ingest check-official
+# Or refresh data/official_revisions.json after syncing new official documents:
+uv run optcg-ingest check-official --write-baseline
+```
+
 ### 2. Ingest Comprehensive Rules & Tournament Rules Manual (`authority = 1`)
 ```bash
 uv run optcg-ingest rules data/raw/rules/rule_comprehensive.pdf
