@@ -1,0 +1,332 @@
+{
+  "schema_version": "1.0",
+  "base_url": "https://en.onepiece-cardgame.com",
+  "documents": {
+    "banlist/restriction.html": {
+      "key": "banlist/restriction.html",
+      "category": "banlist",
+      "url": "https://en.onepiece-cardgame.com/news/restriction.html",
+      "revision": "sha256:f488a779db05",
+      "sha256": "f488a779db05d24d127c9e989e8404792a8d244d39d9cc8268333432ee149a0b",
+      "entry_count": 11,
+      "upcoming_count": 3,
+      "effective_date": "2026-10-12",
+      "upcoming_effective_date": "2026-11-27"
+    },
+    "faq/errata_card.html": {
+      "key": "faq/errata_card.html",
+      "category": "errata",
+      "url": "https://en.onepiece-cardgame.com/rules/errata_card/",
+      "revision": "sha256:fe625213f31f",
+      "sha256": "fe625213f31f0b7408643c792330a138b729cec13f7dca6a706858d07bbad71f",
+      "entry_count": 122,
+      "effective_date": "2025-05-16"
+    },
+    "faq/faq_op15-eb04.pdf": {
+      "key": "faq/faq_op15-eb04.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/faq_op15-eb04.pdf?20260313",
+      "revision": "20260313"
+    },
+    "faq/qa_eb01.pdf": {
+      "key": "faq/qa_eb01.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_eb01.pdf?20240419",
+      "revision": "20240419"
+    },
+    "faq/qa_eb02.pdf": {
+      "key": "faq/qa_eb02.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_eb02.pdf?20250425",
+      "revision": "20250425"
+    },
+    "faq/qa_eb03.pdf": {
+      "key": "faq/qa_eb03.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_eb03.pdf?20261120",
+      "revision": "20261120"
+    },
+    "faq/qa_eb05.pdf": {
+      "key": "faq/qa_eb05.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_eb05.pdf?20261106",
+      "revision": "20261106"
+    },
+    "faq/qa_op01.pdf": {
+      "key": "faq/qa_op01.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op01.pdf?20240405",
+      "revision": "20240405"
+    },
+    "faq/qa_op02.pdf": {
+      "key": "faq/qa_op02.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op02.pdf?20240405",
+      "revision": "20240405"
+    },
+    "faq/qa_op03.pdf": {
+      "key": "faq/qa_op03.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op03.pdf?20240405",
+      "revision": "20240405"
+    },
+    "faq/qa_op04.pdf": {
+      "key": "faq/qa_op04.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op04.pdf?20240405",
+      "revision": "20240405"
+    },
+    "faq/qa_op05.pdf": {
+      "key": "faq/qa_op05.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op05.pdf?20261120",
+      "revision": "20261120"
+    },
+    "faq/qa_op06.pdf": {
+      "key": "faq/qa_op06.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op06.pdf?20240419",
+      "revision": "20240419"
+    },
+    "faq/qa_op07.pdf": {
+      "key": "faq/qa_op07.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op07.pdf?20250228",
+      "revision": "20250228"
+    },
+    "faq/qa_op08.pdf": {
+      "key": "faq/qa_op08.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op08.pdf?20240830",
+      "revision": "20240830"
+    },
+    "faq/qa_op09.pdf": {
+      "key": "faq/qa_op09.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op09.pdf?20261120",
+      "revision": "20261120"
+    },
+    "faq/qa_op10.pdf": {
+      "key": "faq/qa_op10.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op10.pdf?20250228",
+      "revision": "20250228"
+    },
+    "faq/qa_op11.pdf": {
+      "key": "faq/qa_op11.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op11.pdf?20250523",
+      "revision": "20250523"
+    },
+    "faq/qa_op12.pdf": {
+      "key": "faq/qa_op12.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op12.pdf?20260206",
+      "revision": "20260206"
+    },
+    "faq/qa_op13.pdf": {
+      "key": "faq/qa_op13.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op13.pdf?20260206",
+      "revision": "20260206"
+    },
+    "faq/qa_op14_eb04.pdf": {
+      "key": "faq/qa_op14_eb04.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op14_eb04.pdf?20260626",
+      "revision": "20260626"
+    },
+    "faq/qa_op16.pdf": {
+      "key": "faq/qa_op16.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op16.pdf?20261030",
+      "revision": "20261030"
+    },
+    "faq/qa_op17.pdf": {
+      "key": "faq/qa_op17.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op17.pdf?20261120",
+      "revision": "20261120"
+    },
+    "faq/qa_op18.pdf": {
+      "key": "faq/qa_op18.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_op18.pdf?20261120",
+      "revision": "20261120"
+    },
+    "faq/qa_prb01.pdf": {
+      "key": "faq/qa_prb01.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_prb01.pdf?20261120",
+      "revision": "20261120"
+    },
+    "faq/qa_prb02.pdf": {
+      "key": "faq/qa_prb02.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_prb02.pdf?20250919",
+      "revision": "20250919"
+    },
+    "faq/qa_promotion-cards.pdf": {
+      "key": "faq/qa_promotion-cards.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_promotion-cards.pdf?20260206",
+      "revision": "20260206"
+    },
+    "faq/qa_rules.pdf": {
+      "key": "faq/qa_rules.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_rules.pdf?20250228",
+      "revision": "20250228"
+    },
+    "faq/qa_st-01-st-04.pdf": {
+      "key": "faq/qa_st-01-st-04.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-01-st-04.pdf?20261120",
+      "revision": "20261120"
+    },
+    "faq/qa_st-05.pdf": {
+      "key": "faq/qa_st-05.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-05.pdf?20230127",
+      "revision": "20230127"
+    },
+    "faq/qa_st-06.pdf": {
+      "key": "faq/qa_st-06.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-06.pdf?20230303",
+      "revision": "20230303"
+    },
+    "faq/qa_st-07.pdf": {
+      "key": "faq/qa_st-07.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-07.pdf?20230609",
+      "revision": "20230609"
+    },
+    "faq/qa_st-08.pdf": {
+      "key": "faq/qa_st-08.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-08.pdf?20230728",
+      "revision": "20230728"
+    },
+    "faq/qa_st-09.pdf": {
+      "key": "faq/qa_st-09.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-09.pdf?20230728",
+      "revision": "20230728"
+    },
+    "faq/qa_st-10.pdf": {
+      "key": "faq/qa_st-10.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-10.pdf?20240405",
+      "revision": "20240405"
+    },
+    "faq/qa_st-11.pdf": {
+      "key": "faq/qa_st-11.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-11.pdf?20240119",
+      "revision": "20240119"
+    },
+    "faq/qa_st-12.pdf": {
+      "key": "faq/qa_st-12.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-12.pdf?20240301",
+      "revision": "20240301"
+    },
+    "faq/qa_st-13.pdf": {
+      "key": "faq/qa_st-13.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-13.pdf?20240405",
+      "revision": "20240405"
+    },
+    "faq/qa_st-14.pdf": {
+      "key": "faq/qa_st-14.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-14.pdf?20240802",
+      "revision": "20240802"
+    },
+    "faq/qa_st-15-20.pdf": {
+      "key": "faq/qa_st-15-20.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-15-20.pdf?20241011",
+      "revision": "20241011"
+    },
+    "faq/qa_st-21.pdf": {
+      "key": "faq/qa_st-21.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-21.pdf?20250228",
+      "revision": "20250228"
+    },
+    "faq/qa_st-22.pdf": {
+      "key": "faq/qa_st-22.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-22.pdf?20250822",
+      "revision": "20250822"
+    },
+    "faq/qa_st-23-28.pdf": {
+      "key": "faq/qa_st-23-28.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-23-28.pdf?20250530",
+      "revision": "20250530"
+    },
+    "faq/qa_st-29.pdf": {
+      "key": "faq/qa_st-29.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-29.pdf?20260109",
+      "revision": "20260109"
+    },
+    "faq/qa_st-30.pdf": {
+      "key": "faq/qa_st-30.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-30.pdf?20261120",
+      "revision": "20261120"
+    },
+    "faq/qa_st-31.pdf": {
+      "key": "faq/qa_st-31.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-31.pdf?20260717",
+      "revision": "20260717"
+    },
+    "faq/qa_st-32.pdf": {
+      "key": "faq/qa_st-32.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-32.pdf?20260717",
+      "revision": "20260717"
+    },
+    "faq/qa_st-33.pdf": {
+      "key": "faq/qa_st-33.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-33.pdf?20260717",
+      "revision": "20260717"
+    },
+    "faq/qa_st-34.pdf": {
+      "key": "faq/qa_st-34.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-34.pdf?20260821",
+      "revision": "20260821"
+    },
+    "faq/qa_st-35.pdf": {
+      "key": "faq/qa_st-35.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-35.pdf?20260717",
+      "revision": "20260717"
+    },
+    "faq/qa_st-36.pdf": {
+      "key": "faq/qa_st-36.pdf",
+      "category": "faq",
+      "url": "https://en.onepiece-cardgame.com/pdf/qa_st-36.pdf?20260717",
+      "revision": "20260717"
+    },
+    "rules/rule_comprehensive.pdf": {
+      "key": "rules/rule_comprehensive.pdf",
+      "category": "rules",
+      "url": "https://en.onepiece-cardgame.com/pdf/rule_comprehensive.pdf?20260828",
+      "revision": "20260828"
+    },
+    "rules/tournament_rules_manual.pdf": {
+      "key": "rules/tournament_rules_manual.pdf",
+      "category": "trm",
+      "url": "https://en.onepiece-cardgame.com/pdf/tournament_rules_manual.pdf?20260116",
+      "revision": "20260116"
+    }
+  }
+}
