@@ -175,6 +175,7 @@ def build_card_chunk(card: CardRecord) -> ChunkRecord:
             "colors": list(card.colors),
             "traits": list(card.traits),
             "rarity": card.rarity,
+            "block_icon": card.block_icon,
         },
         content_hash=compute_content_hash(text),
     )

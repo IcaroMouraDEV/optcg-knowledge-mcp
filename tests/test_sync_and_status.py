@@ -189,7 +189,7 @@ def _build_mock_official_client(sample_rules_text: str) -> httpx.Client:
 
 def test_get_status_empty_db(db_conn: sqlite3.Connection) -> None:
     status = get_status(db_conn)
-    assert status["schema_version"] == "5"
+    assert status["schema_version"] == "6"
     assert status["rules_version"] is None
     assert status["trm_version"] is None
     assert status["banlist_loaded"] is False
@@ -372,7 +372,7 @@ def test_run_sync_full_offline_pipeline_and_idempotency(
     assert all(step.status == "completed" for step in first.steps)
 
     snap1 = first.status_snapshot
-    assert snap1["schema_version"] == "5"
+    assert snap1["schema_version"] == "6"
     assert snap1["rules_version"] == "1.24"
     assert snap1["banlist_loaded"] is True
     assert snap1["banlist_effective_date"] == "2026-10-12"
@@ -503,7 +503,7 @@ def test_cli_sync_and_status_offline(
     exit_status_json = cli.main(["--db", str(db_path), "status", "--json"])
     assert exit_status_json == 0
     status_payload = json.loads(capsys.readouterr().out)
-    assert status_payload["schema_version"] == "5"
+    assert status_payload["schema_version"] == "6"
     assert status_payload["rules_version"] == "1.24"
     assert status_payload["counts"]["rules"] > 0
     assert status_payload["counts"]["cards"] > 0

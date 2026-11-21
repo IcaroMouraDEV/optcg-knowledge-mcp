@@ -10,10 +10,11 @@ Follow these mandatory rules for every ruling question:
 1. **Always verify against the knowledge base before answering:**
    - Look up every mentioned card with `get_card` (or `get_cards(card_ids=[...],`
      `include_rulings=True)` when evaluating a multi-card interaction to batch-fetch canonical
-     card stats, banlist legality, and linked rulings in a single call, or `search_cards` for
-     attribute/keyword/`ban_status` filters), checking both exact card text and its official
-     banlist legality (`ban_status`, `max_copies`, `paired_card_ids`, `restriction_note`,
-     `effective_date`).
+     card stats, `block_icon`, banlist legality, and linked rulings in a single call, or
+     `search_cards` for attribute/keyword/`ban_status`/`block_icon`/`min_block` filters), checking
+     exact card text, official `block_icon` (highest known printing block icon for Standard
+     rotation checks), and official banlist legality (`ban_status`, `max_copies`,
+     `paired_card_ids`, `restriction_note`, `effective_date`).
    - Use `get_banlist` to inspect the full official Bandai banned/restricted/pair-banned card
      list in a single call whenever the user asks about banlist status or deck legality.
    - Check card-specific FAQs and judge rulings with `get_card_rulings` (or via
@@ -61,6 +62,11 @@ Follow these mandatory rules for every ruling question:
      of the scheduled future restriction and its `effective_date` without treating it as already
      active today. If `banlist_loaded` is `false` and deck legality is relevant, warn the user
      that official banlist data has not been ingested yet.
+   - When format or Standard rotation legality is relevant, also report each card's `block_icon`
+     (reflecting the highest known printing block icon across base and reprint versions; if
+     `block_icon` is `null`, note that block icon metadata is not yet recorded for that card).
+     Remember that official Bandai Rotation Exception Cards or format-specific announcements may
+     still apply alongside raw block numbers.
    - If two sources conflict (e.g., an older judge ruling vs. a newer Comprehensive Rule or
      Official FAQ), state the conflict explicitly, cite both sources, and explain which prevails
      under the authority hierarchy.

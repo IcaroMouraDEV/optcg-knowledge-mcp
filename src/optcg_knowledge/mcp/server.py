@@ -191,8 +191,9 @@ def create_server(
         name="optcg-knowledge",
         instructions=(
             "One Piece Card Game (OPTCG) knowledge base exposing Comprehensive Rules, "
-            "Tournament Rules Manual (TRM), canonical cards (single get_card, batch paginated "
-            "get_cards, and filtered search_cards), official Bandai banlist / card restrictions "
+            "Tournament Rules Manual (TRM), canonical cards with Block Icons (single get_card, "
+            "batch paginated get_cards, and filtered search_cards including block_icon/min_block), "
+            "official Bandai banlist / card restrictions "
             "(via get_banlist, get_card, get_cards, and search_cards), official FAQs/errata, "
             "judge rulings (via get_card_rulings, get_rule_rulings, and hybrid search), "
             "database health/freshness diagnostics (via get_status), and read-only MCP resources "
@@ -266,9 +267,11 @@ def create_server(
         description=(
             "Look up an OPTCG card by canonical card_id (e.g. 'OP05-119', 'ST10-001', 'P-001') "
             "or by name (exact or fuzzy, ignoring punctuation differences like 'Monkey D Luffy'). "
-            "Returns all matching canonical card printings/versions along with active official "
-            "banlist legality (ban_status, max_copies, paired_card_ids, restriction_note, "
-            "effective_date) and any scheduled upcoming_restriction."
+            "Returns all matching canonical card printings/versions along with official Block Icon "
+            "(block_icon, nullable int reflecting the highest known printing block for Standard "
+            "rotation checks), active official banlist legality (ban_status, max_copies, "
+            "paired_card_ids, restriction_note, effective_date), and any scheduled "
+            "upcoming_restriction."
         ),
     )
     def get_card(id_or_name: str) -> dict[str, Any]:
@@ -282,9 +285,9 @@ def create_server(
             "Batch look up multiple OPTCG cards by canonical card_ids (e.g. ['OP05-119', "
             "'OP04-083', 'ST10-001']) in a single paginated call (default page=1, page_size=25, "
             "max 50 per page; returns total_pages, has_more, and next_page). Preserves request "
-            "order, reports missing IDs under not_found, includes active banlist legality and "
-            "upcoming_restriction, and optionally embeds each card's linked rulings ordered by "
-            "authority ASC, judge_tier, date DESC when include_rulings=True."
+            "order, reports missing IDs under not_found, includes official block_icon, active "
+            "banlist legality, and upcoming_restriction, and optionally embeds each card's linked "
+            "rulings ordered by authority ASC, judge_tier, date DESC when include_rulings=True."
         ),
     )
     def get_cards(
@@ -309,10 +312,11 @@ def create_server(
         name="search_cards",
         description=(
             "Filter canonical OPTCG cards by name substring, color, exact cost, trait substring, "
-            "effect/trigger keyword (e.g. '[Blocker]' or 'Rush'), set_code (e.g. 'OP05'), and "
-            "active official ban_status ('legal', 'banned', 'restricted', or 'pair_banned'). "
-            "Defaults to returning up to 25 matches (max 100), including upcoming_restriction "
-            "metadata on each card."
+            "effect/trigger keyword (e.g. '[Blocker]' or 'Rush'), set_code (e.g. 'OP05'), "
+            "active official ban_status ('legal', 'banned', 'restricted', or 'pair_banned'), "
+            "exact block_icon (e.g. 1, 2, 3, 4), and/or min_block (block_icon >= N for Standard "
+            "format rotation checks). Defaults to returning up to 25 matches (max 100), including "
+            "block_icon and upcoming_restriction metadata on each card."
         ),
     )
     def search_cards(
@@ -323,9 +327,11 @@ def create_server(
         keyword: str | None = None,
         set_code: str | None = None,
         ban_status: str | None = None,
+        block_icon: int | None = None,
+        min_block: int | None = None,
         limit: int = 25,
     ) -> dict[str, Any]:
-        """Search canonical cards using structured attribute and banlist filters."""
+        """Search canonical cards using structured attribute, block icon, and banlist filters."""
         with _open_query_db(resolved_settings) as conn:
             return query_search_cards(
                 conn,
@@ -336,6 +342,8 @@ def create_server(
                 keyword=keyword,
                 set_code=set_code,
                 ban_status=ban_status,
+                block_icon=block_icon,
+                min_block=min_block,
                 limit=limit,
             )
 
@@ -575,8 +583,8 @@ def create_server(
         name="card",
         description=(
             "Read-only canonical OPTCG card lookup by card_id (e.g. 'OP05-119', 'ST10-001', "
-            "'P-001'), including active official banlist legality and any scheduled "
-            "upcoming_restriction."
+            "'P-001'), including official block_icon, active official banlist legality, and any "
+            "scheduled upcoming_restriction."
         ),
         mime_type="application/json",
     )
