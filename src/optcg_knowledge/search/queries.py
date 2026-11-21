@@ -127,6 +127,13 @@ def _has_card_restrictions_scope_column(conn: sqlite3.Connection) -> bool:
     return "scope" in cols
 
 
+def _has_cards_block_icon_column(conn: sqlite3.Connection) -> bool:
+    if not _has_table(conn, "cards"):
+        return False
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(cards)").fetchall()}
+    return "block_icon" in cols
+
+
 def _load_restrictions_by_card_id(
     conn: sqlite3.Connection,
     card_ids: list[str] | None = None,
@@ -199,6 +206,14 @@ def _serialize_upcoming_restriction(
     }
 
 
+def _optional_row_int(row: sqlite3.Row, column: str) -> int | None:
+    try:
+        value = row[column]
+    except (IndexError, KeyError):
+        return None
+    return int(value) if value is not None else None
+
+
 def _serialize_card_row(
     row: sqlite3.Row,
     restriction: sqlite3.Row | None = None,
@@ -240,6 +255,7 @@ def _serialize_card_row(
         "effect_text": str(row["effect_text"]) if row["effect_text"] is not None else None,
         "trigger_text": str(row["trigger_text"]) if row["trigger_text"] is not None else None,
         "rarity": str(row["rarity"]) if row["rarity"] is not None else None,
+        "block_icon": _optional_row_int(row, "block_icon"),
         "image_url": str(row["image_url"]) if row["image_url"] is not None else None,
         "variant_count": _extract_variant_count(row["raw_json"]),
         "ban_status": ban_status,
@@ -597,11 +613,17 @@ def search_cards(
     keyword: str | None = None,
     set_code: str | None = None,
     ban_status: str | None = None,
+    block_icon: int | None = None,
+    min_block: int | None = None,
     limit: int = 25,
 ) -> dict[str, Any]:
-    """Filter canonical OPTCG cards by structured attributes, text keywords, and ban_status."""
+    """Filter canonical OPTCG cards by attributes, text keywords, ban_status, and block icon."""
     if limit <= 0:
         raise ValueError("limit must be a positive integer")
+    if block_icon is not None and (isinstance(block_icon, bool) or block_icon < 1):
+        raise ValueError("block_icon must be a positive integer (>= 1)")
+    if min_block is not None and (isinstance(min_block, bool) or min_block < 1):
+        raise ValueError("min_block must be a positive integer (>= 1)")
     effective_limit = min(limit, MAX_SEARCH_CARDS_LIMIT)
 
     normalized_ban_status = (
@@ -610,6 +632,7 @@ def search_cards(
         else None
     )
 
+    has_block_col = _has_cards_block_icon_column(conn)
     clauses: list[str] = []
     params: list[Any] = []
 
@@ -619,6 +642,18 @@ def search_cards(
     if cost is not None:
         clauses.append("cost = ?")
         params.append(cost)
+    if block_icon is not None:
+        if has_block_col:
+            clauses.append("block_icon = ?")
+            params.append(block_icon)
+        else:
+            clauses.append("1 = 0")
+    if min_block is not None:
+        if has_block_col:
+            clauses.append("block_icon >= ?")
+            params.append(min_block)
+        else:
+            clauses.append("1 = 0")
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = conn.execute(
@@ -684,6 +719,8 @@ def search_cards(
             "keyword": keyword,
             "set_code": set_code,
             "ban_status": normalized_ban_status,
+            "block_icon": block_icon,
+            "min_block": min_block,
         },
         **_banlist_meta(conn),
         "total_matched": len(matched),
@@ -715,6 +752,11 @@ def _query_banlist_scope(
         clauses.append("cr.ban_status = ?")
         params.append(normalized_filter)
 
+    block_select = (
+        "c.block_icon AS block_icon"
+        if _has_cards_block_icon_column(conn)
+        else "NULL AS block_icon"
+    )
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = conn.execute(
         f"""
@@ -729,7 +771,8 @@ def _query_banlist_scope(
             c.name AS card_name,
             c.set_code,
             c.category,
-            c.colors
+            c.colors,
+            {block_select}
         FROM card_restrictions cr
         LEFT JOIN cards c ON c.card_id = cr.card_id
         {where_sql}
@@ -768,6 +811,9 @@ def _query_banlist_scope(
                 "set_code": str(row["set_code"]) if row["set_code"] is not None else None,
                 "category": str(row["category"]) if row["category"] is not None else None,
                 "colors": _parse_json_list(row["colors"]),
+                "block_icon": (
+                    int(row["block_icon"]) if row["block_icon"] is not None else None
+                ),
                 "ban_status": status,
                 "max_copies": int(row["max_copies"]),
                 "paired_card_ids": paired,

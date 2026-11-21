@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -142,6 +143,53 @@ class TrmSectionRecord:
     effective_date: str | None = None
 
 
+def normalize_block_icon(value: Any) -> int | None:
+    """Normalize an OPTCG Block Icon value to a positive integer (>= 1) or None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 1 else None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned == "-":
+            return None
+        try:
+            parsed = int(cleaned)
+        except ValueError:
+            return None
+        return parsed if parsed >= 1 else None
+    return None
+
+
+def extract_block_icon_from_raw(raw: Mapping[str, Any]) -> int | None:
+    """Extract the highest known Block Icon across a card's base printing and variants.
+
+    Supports `punk-records` (`block_number`) and local JSON aliases (`block_icon`, `block`).
+    Under official Bandai Standard rotation rules, a reprint with a newer Block Icon keeps
+    all printings of that canonical card_id legal, so the maximum valid block is returned.
+    """
+    candidates: list[int] = []
+
+    for key in ("block_icon", "block_number", "block"):
+        parsed = normalize_block_icon(raw.get(key))
+        if parsed is not None:
+            candidates.append(parsed)
+            break
+
+    variants = raw.get("variants")
+    if isinstance(variants, list):
+        for variant in variants:
+            if not isinstance(variant, Mapping):
+                continue
+            for key in ("block_icon", "block_number", "block"):
+                parsed = normalize_block_icon(variant.get(key))
+                if parsed is not None:
+                    candidates.append(parsed)
+                    break
+
+    return max(candidates) if candidates else None
+
+
 @dataclass(frozen=True, slots=True)
 class CardRecord:
     """Canonical mechanical representation of a One Piece TCG card."""
@@ -160,6 +208,7 @@ class CardRecord:
     effect_text: str | None = None
     trigger_text: str | None = None
     rarity: str | None = None
+    block_icon: int | None = None
     image_url: str | None = None
     raw_json: dict[str, Any] = field(default_factory=dict)
 

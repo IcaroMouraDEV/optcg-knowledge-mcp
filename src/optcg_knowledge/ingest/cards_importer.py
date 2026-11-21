@@ -10,7 +10,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from optcg_knowledge.db.models import CardRecord
+from optcg_knowledge.db.models import (
+    CardRecord,
+    extract_block_icon_from_raw,
+    normalize_block_icon,
+)
 from optcg_knowledge.db.schema import set_meta, utc_now_iso
 from optcg_knowledge.ingest.chunking import build_card_chunk, upsert_chunks
 from optcg_knowledge.ingest.sources.base import CardSource
@@ -123,11 +127,20 @@ def _normalize_image_url(raw: dict[str, Any]) -> str | None:
     return None
 
 
+def _single_printing_block_icon(raw: dict[str, Any]) -> int | None:
+    for key in ("block_icon", "block_number", "block"):
+        parsed = normalize_block_icon(raw.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _variant_metadata(raw_id: str, raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": raw_id,
         "pack_id": raw.get("pack_id") or raw.get("set_code"),
         "rarity": _normalize_optional_text(raw.get("rarity")),
+        "block_icon": _single_printing_block_icon(raw),
         "image_url": _normalize_image_url(raw),
     }
 
@@ -176,6 +189,7 @@ def _build_card_record(
             variants,
             key=lambda item: (str(item.get("id", "")), str(item.get("pack_id", ""))),
         )
+    block_icon = extract_block_icon_from_raw(raw_payload)
 
     return CardRecord(
         card_id=canonical_id,
@@ -192,6 +206,7 @@ def _build_card_record(
         effect_text=effect_text,
         trigger_text=trigger_text,
         rarity=rarity,
+        block_icon=block_icon,
         image_url=image_url,
         raw_json=raw_payload,
     )
@@ -243,8 +258,9 @@ def ingest_cards(conn: sqlite3.Connection, source: CardSource) -> CardsIngestSum
             """
             INSERT INTO cards (
                 card_id, name, set_code, category, colors, cost, life, power, counter,
-                attributes, traits, effect_text, trigger_text, rarity, image_url, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                attributes, traits, effect_text, trigger_text, rarity, block_icon,
+                image_url, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(card_id) DO UPDATE SET
                 name = excluded.name,
                 set_code = excluded.set_code,
@@ -259,6 +275,7 @@ def ingest_cards(conn: sqlite3.Connection, source: CardSource) -> CardsIngestSum
                 effect_text = excluded.effect_text,
                 trigger_text = excluded.trigger_text,
                 rarity = excluded.rarity,
+                block_icon = excluded.block_icon,
                 image_url = excluded.image_url,
                 raw_json = excluded.raw_json
             """,
@@ -278,6 +295,7 @@ def ingest_cards(conn: sqlite3.Connection, source: CardSource) -> CardsIngestSum
                     c.effect_text,
                     c.trigger_text,
                     c.rarity,
+                    c.block_icon,
                     c.image_url,
                     json.dumps(c.raw_json, ensure_ascii=False, sort_keys=True),
                 )

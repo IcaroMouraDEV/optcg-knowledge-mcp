@@ -180,10 +180,10 @@ Date: 2026-11-18
 | **Query** | `search` | Hybrid search (exact OPTCG tokens + FTS5 BM25 + `sqlite-vec` + RRF + authority/tier tie-breaking) |
 | **Query** | `get_rule` | Look up a Comprehensive Rule by `rule_id` with ancestors and ordered children |
 | **Query** | `get_trm_section` | Look up a Tournament Rules Manual section by `section_id` (`TRM-7.4.1`) with ancestors and children |
-| **Query** | `get_card` | Look up canonical card(s) by exact `card_id` or fuzzy name, including active banlist legality and `upcoming_restriction` |
-| **Query** | `get_cards` | Batch look up multiple `card_ids` with pagination (`page`, `page_size`, `has_more`, `next_page`), banlist legality, and optional `include_rulings=True` |
-| **Query** | `search_cards` | Filter cards by `name`, `color`, `cost`, `trait`, `keyword`, `set_code`, and active `ban_status` |
-| **Query** | `get_banlist` | Retrieve the official Bandai banlist (`banned`, `restricted`, `pair_banned`) and separate `upcoming` announcements in one call |
+| **Query** | `get_card` | Look up canonical card(s) by exact `card_id` or fuzzy name, including `block_icon`, active banlist legality, and `upcoming_restriction` |
+| **Query** | `get_cards` | Batch look up multiple `card_ids` with pagination (`page`, `page_size`, `has_more`, `next_page`), `block_icon`, banlist legality, and optional `include_rulings=True` |
+| **Query** | `search_cards` | Filter cards by `name`, `color`, `cost`, `trait`, `keyword`, `set_code`, active `ban_status`, exact `block_icon`, and/or `min_block` (Standard rotation threshold) |
+| **Query** | `get_banlist` | Retrieve the official Bandai banlist (`banned`, `restricted`, `pair_banned`, with card `block_icon`) and separate `upcoming` announcements in one call |
 | **Query** | `get_card_rulings` | List rulings linked to a `card_id` ordered by `authority`, `judge_tier`, `date DESC` |
 | **Query** | `get_rule_rulings` | List rulings citing a Comprehensive Rule `rule_id` (and optional sub-rules via `include_children=True`) ordered by `authority`, `judge_tier`, `date DESC` |
 | **Curation** | `add_ruling` | Insert anonymized curated ruling (`reviewed=False`), indexed immediately in FTS5 |
@@ -191,7 +191,7 @@ Date: 2026-11-18
 | **Curation** | `list_unreviewed_rulings` | Inspect curated rulings awaiting manual approval |
 | **Diagnostics** | `get_status` | Report DB schema/rules/TRM/banlist versions, table/authority/tier counts, embedding coverage, and timestamps |
 | **Interop** | `export_rulings` | Export vetted rulings using the exact same versioned JSON schema as the CLI |
-| **Prompt** | `juiz` | OPTCG rules judge workflow citing authority, exact IDs, banlist legality, conflicts, and staleness |
+| **Prompt** | `juiz` | OPTCG rules judge workflow citing authority, exact IDs, `block_icon`, banlist legality, conflicts, and staleness |
 | **Prompt** | `curar(arquivo)` | Anonymized judge chat curation workflow targeting `data/raw/judge_chats/<arquivo>` |
 
 ### Read-Only MCP Resources (`optcg://...`)
@@ -204,7 +204,7 @@ Clients that support attaching MCP Resources directly (e.g., via `@`-mentions) c
 | `optcg://banlist` | Static | `get_banlist()` | Active and upcoming official Bandai banlist / card restrictions |
 | `optcg://rules/{rule_id}` | Template | `get_rule(rule_id)` | Comprehensive Rule by `rule_id` (e.g., `optcg://rules/7-1-4-1`) with ancestors and ordered children |
 | `optcg://trm/{section_id}` | Template | `get_trm_section(section_id)` | Tournament Rules Manual section by `section_id` (e.g., `optcg://trm/TRM-7.4.1`) with ancestors and children |
-| `optcg://cards/{card_id}` | Template | `get_card(card_id)` | Canonical card by `card_id` (e.g., `optcg://cards/OP05-119`) with active banlist legality and `upcoming_restriction` |
+| `optcg://cards/{card_id}` | Template | `get_card(card_id)` | Canonical card by `card_id` (e.g., `optcg://cards/OP05-119`) with `block_icon`, active banlist legality, and `upcoming_restriction` |
 
 ---
 

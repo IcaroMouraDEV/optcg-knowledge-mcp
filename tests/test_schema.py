@@ -495,7 +495,7 @@ def test_migrate_v4_to_v5_adds_scope_and_composite_pk_without_touching_vectors(t
         # Calling init_schema (as open_db(init=True) does in CLI commands) on a v4 DB
         # must migrate card_restrictions before running BASE_SCHEMA_SQL indexes.
         init_schema(conn, embedding_dim=64, embedding_model=embedder.model_name)
-        assert get_meta(conn, "schema_version") == "5"
+        assert get_meta(conn, "schema_version") == SCHEMA_VERSION
 
         # Existing v4 row is preserved with scope='active', and the same card_id can
         # now also hold a separate scope='upcoming' row.
@@ -541,6 +541,146 @@ def test_migrate_v4_to_v5_adds_scope_and_composite_pk_without_touching_vectors(t
             (qvec,),
         ).fetchall()
         assert [r["chunk_id"] for r in knn] == ["card:OP05-119"]
+
+        with conn:
+            assert migrate_schema(conn) is False
+
+
+def test_migrate_v5_to_v6_adds_block_icon_backfills_raw_json_and_preserves_vectors(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy_v5.db"
+    embedder = HashEmbedder(dimension=64)
+
+    with connect(db_path) as conn:
+        init_schema(conn, embedding_dim=64, embedding_model=embedder.model_name)
+        with conn:
+            # Replace cards with the schema v5 table (no block_icon column).
+            conn.execute("DROP TABLE cards")
+            conn.execute(
+                """
+                CREATE TABLE cards (
+                    card_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    set_code TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    colors TEXT NOT NULL DEFAULT '[]',
+                    cost INTEGER,
+                    life INTEGER,
+                    power INTEGER,
+                    counter INTEGER,
+                    attributes TEXT NOT NULL DEFAULT '[]',
+                    traits TEXT NOT NULL DEFAULT '[]',
+                    effect_text TEXT,
+                    trigger_text TEXT,
+                    rarity TEXT,
+                    image_url TEXT,
+                    raw_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO cards (
+                    card_id, name, set_code, category, colors, raw_json
+                ) VALUES (?, ?, ?, ?, '["Red"]', ?)
+                """,
+                [
+                    (
+                        "OP01-001",
+                        "Roronoa Zoro",
+                        "OP01",
+                        "Leader",
+                        '{"id": "OP01-001", "block_number": 1}',
+                    ),
+                    (
+                        "OP05-119",
+                        "Monkey.D.Luffy",
+                        "OP05",
+                        "Character",
+                        (
+                            '{"id": "OP05-119", "block_number": 1, '
+                            '"variants": [{"id": "OP05-119_r1", "block_number": 4}]}'
+                        ),
+                    ),
+                    (
+                        "ST10-001",
+                        "Trafalgar Law",
+                        "ST10",
+                        "Leader",
+                        '{"id": "ST10-001", "block_icon": "2"}',
+                    ),
+                    (
+                        "P-001",
+                        "Monkey.D.Luffy",
+                        "P",
+                        "Character",
+                        '{"id": "P-001", "block_number": null}',
+                    ),
+                ],
+            )
+            conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
+
+            text = "OP05-119 Monkey.D.Luffy extra turn."
+            upsert_chunks(
+                conn,
+                [
+                    ChunkRecord(
+                        chunk_id="card:OP05-119",
+                        doc_type="card",
+                        doc_id="OP05-119",
+                        text=text,
+                        authority=1,
+                        metadata={"card_id": "OP05-119"},
+                        content_hash=compute_content_hash(text),
+                    )
+                ],
+            )
+            row = conn.execute(
+                "SELECT rowid, text FROM chunks WHERE chunk_id = 'card:OP05-119'"
+            ).fetchone()
+            vec = embedder.embed([str(row["text"])])[0]
+            conn.execute(
+                "INSERT INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
+                (row["rowid"], serialize_vector(vec)),
+            )
+
+        # init_schema must migrate v5 -> v6 cleanly and backfill block_icon from raw_json.
+        init_schema(conn, embedding_dim=64, embedding_model=embedder.model_name)
+        assert get_meta(conn, "schema_version") == "6"
+
+        rows = conn.execute(
+            "SELECT card_id, block_icon FROM cards ORDER BY card_id ASC"
+        ).fetchall()
+        assert [(str(r["card_id"]), r["block_icon"]) for r in rows] == [
+            ("OP01-001", 1),
+            ("OP05-119", 4),
+            ("P-001", None),
+            ("ST10-001", 2),
+        ]
+
+        # CHECK constraint rejects non-positive block_icon values.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO cards (card_id, name, set_code, category, block_icon, raw_json)
+                VALUES ('OP99-001', 'Invalid', 'OP99', 'Character', 0, '{}')
+                """
+            )
+
+        # Existing chunks_vec embeddings remain untouched.
+        qvec = serialize_vector(embedder.embed_query("Monkey.D.Luffy extra turn"))
+        knn = conn.execute(
+            """
+            SELECT c.chunk_id
+            FROM chunks_vec v
+            JOIN chunks c ON c.rowid = v.rowid
+            WHERE v.embedding MATCH ? AND k = 1
+            """,
+            (qvec,),
+        ).fetchall()
+        assert [r["chunk_id"] for r in knn] == ["card:OP05-119"]
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
 
         with conn:
             assert migrate_schema(conn) is False
