@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from optcg_knowledge.curation import add_ruling, mark_ruling
 from optcg_knowledge.db import connect
 from optcg_knowledge.ingest import (
     HashEmbedder,
@@ -20,6 +21,7 @@ from optcg_knowledge.ingest import (
     parse_trm_text,
 )
 from optcg_knowledge.mcp import create_server
+from optcg_knowledge.search.queries import MAX_BATCH_CARDS_PAGE_SIZE, get_cards
 
 
 def _extract_json_payload(call_result: Any) -> dict[str, Any]:
@@ -49,9 +51,11 @@ def test_mcp_server_registers_all_tools_and_prompts(
         "get_rule",
         "get_trm_section",
         "get_card",
+        "get_cards",
         "search_cards",
         "get_banlist",
         "get_card_rulings",
+        "get_rule_rulings",
         "add_ruling",
         "mark_ruling",
         "list_unreviewed_rulings",
@@ -198,6 +202,8 @@ def test_mcp_query_tools_contracts_and_zero_stdout_leak(
     prompt_text = out["prompt"].messages[0].content.text
     assert "authority = 1" in prompt_text
     assert "get_card_rulings" in prompt_text
+    assert "get_rule_rulings" in prompt_text
+    assert "get_cards" in prompt_text
     assert "get_trm_section" in prompt_text
     assert "get_banlist" in prompt_text
     assert "tournament_rules" in prompt_text
@@ -491,3 +497,267 @@ def test_mcp_get_status_contract_and_zero_stdout_leak(
     assert status["timestamps"]["last_ingested_at"] is not None
     assert status["timestamps"]["last_embed_at"] is not None
     assert status["timestamps"]["banlist_last_ingested_at"] is not None
+
+
+def test_mcp_get_rule_rulings_ordering_children_and_superseded(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, embedder = populated_db
+
+    # Add judge rulings citing parent rule 7-1-4 and child rule 7-1-4-1 across judge tiers.
+    t1_res = add_ruling(
+        conn,
+        question="Does [Blocker] require resting the Character under rule 7-1-4-1?",
+        answer="Yes, activating [Blocker] requires resting the Character.",
+        source="judge",
+        date="2026-01-10",
+        card_ids=["OP04-083"],
+        rule_refs=["7-1-4-1"],
+        judge_tier="tier_1",
+    )
+    t0_res = add_ruling(
+        conn,
+        question="Can [Blocker] be activated if the Character is already rested?",
+        answer="No. Under 7-1-4 and 7-1-4-1, only an active Character with [Blocker] can rest.",
+        source="judge",
+        date="2026-01-05",
+        card_ids=["OP04-083"],
+        rule_refs=["7-1-4", "7-1-4-1"],
+        judge_tier="tier_0",
+    )
+    old_res = add_ruling(
+        conn,
+        question="Superseded blocker question on 7-1-4-1.",
+        answer="Superseded answer.",
+        source="judge",
+        date="2025-05-01",
+        card_ids=["OP04-083"],
+        rule_refs=["7-1-4-1"],
+        judge_tier="tier_2",
+    )
+    mark_ruling(
+        conn,
+        old_res["ruling"]["ruling_id"],
+        superseded_by=t0_res["ruling"]["ruling_id"],
+    )
+
+    server = create_server(db_path=db_path, embedder=embedder)
+    assert "get_rule_rulings" in (server.instructions or "")
+
+    async def _run() -> dict[str, Any]:
+        rule_132 = _extract_json_payload(
+            await server.call_tool("get_rule_rulings", {"rule_id": "1-3-2"})
+        )
+        parent_exact = _extract_json_payload(
+            await server.call_tool(
+                "get_rule_rulings",
+                {"rule_id": "7-1-4", "include_children": False},
+            )
+        )
+        parent_with_children = _extract_json_payload(
+            await server.call_tool(
+                "get_rule_rulings",
+                {"rule_id": "7-1-4", "include_children": True},
+            )
+        )
+        child_with_superseded = _extract_json_payload(
+            await server.call_tool(
+                "get_rule_rulings",
+                {"rule_id": "7-1-4-1", "include_superseded": True},
+            )
+        )
+        missing_rule = _extract_json_payload(
+            await server.call_tool("get_rule_rulings", {"rule_id": "99-9-9"})
+        )
+        return {
+            "rule_132": rule_132,
+            "parent_exact": parent_exact,
+            "parent_with_children": parent_with_children,
+            "child_with_superseded": child_with_superseded,
+            "missing_rule": missing_rule,
+        }
+
+    out = asyncio.run(_run())
+    assert capsys.readouterr().out == ""
+
+    # 1-3-2 has 2 active rulings in populated_db: authority 2 (official_faq) before authority 3
+    assert out["rule_132"]["rule_id"] == "1-3-2"
+    assert out["rule_132"]["rule_found"] is True
+    assert out["rule_132"]["include_children"] is False
+    assert out["rule_132"]["matched_rule_ids"] == ["1-3-2"]
+    assert [r["ruling_id"] for r in out["rule_132"]["rulings"]] == [
+        "faq:op05:119-1",
+        "judge:2025-09-10:001",
+    ]
+
+    # Exact match on 7-1-4 returns only the ruling explicitly citing 7-1-4
+    assert out["parent_exact"]["rule_found"] is True
+    assert out["parent_exact"]["matched_rule_ids"] == ["7-1-4"]
+    assert [r["ruling_id"] for r in out["parent_exact"]["rulings"]] == [
+        t0_res["ruling"]["ruling_id"]
+    ]
+
+    # include_children=True on 7-1-4 includes 7-1-4-1, deduplicates t0_res, orders tier_0 > tier_1
+    assert out["parent_with_children"]["include_children"] is True
+    assert out["parent_with_children"]["matched_rule_ids"] == ["7-1-4", "7-1-4-1"]
+    assert [r["ruling_id"] for r in out["parent_with_children"]["rulings"]] == [
+        t0_res["ruling"]["ruling_id"],
+        t1_res["ruling"]["ruling_id"],
+    ]
+
+    # include_superseded=True includes superseded tier_2 ruling in tier_0 > tier_2 > tier_1 order
+    assert [r["ruling_id"] for r in out["child_with_superseded"]["rulings"]] == [
+        t0_res["ruling"]["ruling_id"],
+        old_res["ruling"]["ruling_id"],
+        t1_res["ruling"]["ruling_id"],
+    ]
+
+    assert out["missing_rule"]["rule_found"] is False
+    assert out["missing_rule"]["total"] == 0
+    assert out["missing_rule"]["rulings"] == []
+
+
+def test_mcp_get_cards_batch_pagination_banlist_rulings_and_validation(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, embedder = populated_db
+    doc, _ = parse_banlist_json(
+        {
+            "effective_date": "2026-10-12",
+            "upcoming_effective_date": "2026-11-27",
+            "restrictions": [
+                {"card_id": "OP04-083", "ban_status": "restricted"},
+            ],
+            "upcoming_banned_pairs": [["OP05-119", "ST10-001"]],
+        }
+    )
+    ingest_banlist(conn, doc)
+
+    server = create_server(db_path=db_path, embedder=embedder)
+    assert "get_cards" in (server.instructions or "")
+
+    requested = ["op05-119", "OP04-083", "OP05-119", "OP99-999", "st10-001"]
+
+    async def _run() -> dict[str, Any]:
+        page1 = _extract_json_payload(
+            await server.call_tool(
+                "get_cards",
+                {
+                    "card_ids": requested,
+                    "include_rulings": True,
+                    "include_superseded": False,
+                    "page": 1,
+                    "page_size": 2,
+                },
+            )
+        )
+        page2 = _extract_json_payload(
+            await server.call_tool(
+                "get_cards",
+                {
+                    "card_ids": requested,
+                    "include_rulings": False,
+                    "page": 2,
+                    "page_size": 2,
+                },
+            )
+        )
+        page3_empty = _extract_json_payload(
+            await server.call_tool(
+                "get_cards",
+                {
+                    "card_ids": requested,
+                    "page": 3,
+                    "page_size": 2,
+                },
+            )
+        )
+        with_superseded = _extract_json_payload(
+            await server.call_tool(
+                "get_cards",
+                {
+                    "card_ids": ["OP05-119"],
+                    "include_rulings": True,
+                    "include_superseded": True,
+                },
+            )
+        )
+        return {
+            "page1": page1,
+            "page2": page2,
+            "page3_empty": page3_empty,
+            "with_superseded": with_superseded,
+        }
+
+    out = asyncio.run(_run())
+    assert capsys.readouterr().out == ""
+
+    # Deduplicated total_requested is 4: ["OP05-119", "OP04-083", "OP99-999", "ST10-001"]
+    p1 = out["page1"]
+    assert p1["total_requested"] == 4
+    assert p1["requested_ids"] == ["OP05-119", "OP04-083"]
+    assert p1["page"] == 1
+    assert p1["page_size"] == 2
+    assert p1["total_pages"] == 2
+    assert p1["has_more"] is True
+    assert p1["next_page"] == 2
+    assert p1["found"] == 2
+    assert p1["not_found"] == []
+    assert p1["banlist_loaded"] is True
+    assert p1["banlist_effective_date"] == "2026-10-12"
+    assert p1["banlist_upcoming_effective_date"] == "2026-11-27"
+    assert [c["card_id"] for c in p1["cards"]] == ["OP05-119", "OP04-083"]
+
+    # OP05-119 is legal today with an upcoming pair ban, and has 2 active rulings
+    luffy_card = p1["cards"][0]
+    assert luffy_card["ban_status"] == "legal"
+    assert luffy_card["upcoming_restriction"]["ban_status"] == "pair_banned"
+    assert luffy_card["upcoming_restriction"]["paired_card_ids"] == ["ST10-001"]
+    assert [r["ruling_id"] for r in luffy_card["rulings"]] == [
+        "faq:op05:119-1",
+        "judge:2025-09-10:001",
+    ]
+
+    # OP04-083 is actively restricted today and has 0 rulings
+    sabo_card = p1["cards"][1]
+    assert sabo_card["ban_status"] == "restricted"
+    assert sabo_card["max_copies"] == 1
+    assert sabo_card["rulings"] == []
+
+    # Page 2 contains ["OP99-999", "ST10-001"] with include_rulings=False
+    p2 = out["page2"]
+    assert p2["requested_ids"] == ["OP99-999", "ST10-001"]
+    assert p2["page"] == 2
+    assert p2["total_pages"] == 2
+    assert p2["has_more"] is False
+    assert p2["next_page"] is None
+    assert p2["found"] == 1
+    assert p2["not_found"] == ["OP99-999"]
+    assert [c["card_id"] for c in p2["cards"]] == ["ST10-001"]
+    assert "rulings" not in p2["cards"][0]
+
+    # Out-of-range page 3 returns empty slice cleanly
+    p3 = out["page3_empty"]
+    assert p3["requested_ids"] == []
+    assert p3["found"] == 0
+    assert p3["has_more"] is False
+    assert p3["next_page"] is None
+    assert p3["cards"] == []
+
+    # include_superseded=True includes the 3rd superseded ruling on OP05-119
+    assert len(out["with_superseded"]["cards"][0]["rulings"]) == 3
+
+    # Direct query-layer validation & page_size cap tests
+    capped = get_cards(conn, ["OP05-119"], page_size=999)
+    assert capped["page_size"] == MAX_BATCH_CARDS_PAGE_SIZE
+
+    with pytest.raises(ValueError, match="at least one non-empty card_id"):
+        get_cards(conn, ["  ", ""])
+    with pytest.raises(ValueError, match="not a string"):
+        get_cards(conn, "OP05-119")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="page must be a positive integer"):
+        get_cards(conn, ["OP05-119"], page=0)
+    with pytest.raises(ValueError, match="page_size must be a positive integer"):
+        get_cards(conn, ["OP05-119"], page_size=0)

@@ -174,9 +174,11 @@ Date: 2026-11-18
 | **Query** | `get_rule` | Look up a Comprehensive Rule by `rule_id` with ancestors and ordered children |
 | **Query** | `get_trm_section` | Look up a Tournament Rules Manual section by `section_id` (`TRM-7.4.1`) with ancestors and children |
 | **Query** | `get_card` | Look up canonical card(s) by exact `card_id` or fuzzy name, including active banlist legality and `upcoming_restriction` |
+| **Query** | `get_cards` | Batch look up multiple `card_ids` with pagination (`page`, `page_size`, `has_more`, `next_page`), banlist legality, and optional `include_rulings=True` |
 | **Query** | `search_cards` | Filter cards by `name`, `color`, `cost`, `trait`, `keyword`, `set_code`, and active `ban_status` |
 | **Query** | `get_banlist` | Retrieve the official Bandai banlist (`banned`, `restricted`, `pair_banned`) and separate `upcoming` announcements in one call |
 | **Query** | `get_card_rulings` | List rulings linked to a `card_id` ordered by `authority`, `judge_tier`, `date DESC` |
+| **Query** | `get_rule_rulings` | List rulings citing a Comprehensive Rule `rule_id` (and optional sub-rules via `include_children=True`) ordered by `authority`, `judge_tier`, `date DESC` |
 | **Curation** | `add_ruling` | Insert anonymized curated ruling (`reviewed=False`), indexed immediately in FTS5 |
 | **Curation** | `mark_ruling` | Update `reviewed`, `superseded_by` (cycle-checked), and/or `judge_tier` |
 | **Curation** | `list_unreviewed_rulings` | Inspect curated rulings awaiting manual approval |

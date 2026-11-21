@@ -41,7 +41,13 @@ from optcg_knowledge.search.queries import (
     get_card_rulings as query_get_card_rulings,
 )
 from optcg_knowledge.search.queries import (
+    get_cards as query_get_cards,
+)
+from optcg_knowledge.search.queries import (
     get_rule as query_get_rule,
+)
+from optcg_knowledge.search.queries import (
+    get_rule_rulings as query_get_rule_rulings,
 )
 from optcg_knowledge.search.queries import (
     get_status as query_get_status,
@@ -185,10 +191,11 @@ def create_server(
         name="optcg-knowledge",
         instructions=(
             "One Piece Card Game (OPTCG) knowledge base exposing Comprehensive Rules, "
-            "Tournament Rules Manual (TRM), canonical cards, official Bandai banlist / card "
-            "restrictions (via get_banlist, get_card, and search_cards), official FAQs/errata, "
-            "judge rulings with hybrid search, and database health/freshness diagnostics "
-            "(via get_status). Authority hierarchy: "
+            "Tournament Rules Manual (TRM), canonical cards (single get_card, batch paginated "
+            "get_cards, and filtered search_cards), official Bandai banlist / card restrictions "
+            "(via get_banlist, get_card, get_cards, and search_cards), official FAQs/errata, "
+            "judge rulings (via get_card_rulings, get_rule_rulings, and hybrid search), and "
+            "database health/freshness diagnostics (via get_status). Authority hierarchy: "
             "1=rules/tournament_rules > 2=official_faq/errata > 3=judge > 4=community."
         ),
     )
@@ -268,6 +275,35 @@ def create_server(
             return query_get_card(conn, id_or_name)
 
     @server.tool(
+        name="get_cards",
+        description=(
+            "Batch look up multiple OPTCG cards by canonical card_ids (e.g. ['OP05-119', "
+            "'OP04-083', 'ST10-001']) in a single paginated call (default page=1, page_size=25, "
+            "max 50 per page; returns total_pages, has_more, and next_page). Preserves request "
+            "order, reports missing IDs under not_found, includes active banlist legality and "
+            "upcoming_restriction, and optionally embeds each card's linked rulings ordered by "
+            "authority ASC, judge_tier, date DESC when include_rulings=True."
+        ),
+    )
+    def get_cards(
+        card_ids: list[str],
+        include_rulings: bool = False,
+        include_superseded: bool = False,
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict[str, Any]:
+        """Batch look up canonical cards with pagination, banlist status, and optional rulings."""
+        with _open_query_db(resolved_settings) as conn:
+            return query_get_cards(
+                conn,
+                card_ids,
+                include_rulings=include_rulings,
+                include_superseded=include_superseded,
+                page=page,
+                page_size=page_size,
+            )
+
+    @server.tool(
         name="search_cards",
         description=(
             "Filter canonical OPTCG cards by name substring, color, exact cost, trait substring, "
@@ -332,6 +368,30 @@ def create_server(
                 conn,
                 card_id,
                 include_superseded=include_superseded,
+            )
+
+    @server.tool(
+        name="get_rule_rulings",
+        description=(
+            "Retrieve official FAQs, errata, and judge rulings citing a specific Comprehensive "
+            "Rule (e.g. '7-1-4-1' or '1-3-2'), ordered by authority ASC (1 highest .. 4 lowest), "
+            "judge_tier (tier_0 > tier_2 > tier_1), then date DESC. Set include_children=True to "
+            "also include rulings citing descendant sub-rules (e.g. '7-1-4-%'). Excludes "
+            "superseded rulings by default unless include_superseded=True."
+        ),
+    )
+    def get_rule_rulings(
+        rule_id: str,
+        include_superseded: bool = False,
+        include_children: bool = False,
+    ) -> dict[str, Any]:
+        """List rulings citing a Comprehensive Rule (and optionally descendant sub-rules)."""
+        with _open_query_db(resolved_settings) as conn:
+            return query_get_rule_rulings(
+                conn,
+                rule_id,
+                include_superseded=include_superseded,
+                include_children=include_children,
             )
 
     @server.tool(
