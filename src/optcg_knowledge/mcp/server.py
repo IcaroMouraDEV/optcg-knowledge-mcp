@@ -269,7 +269,8 @@ def create_server(
             "or by name (exact or fuzzy, ignoring punctuation differences like 'Monkey D Luffy'). "
             "Returns all matching canonical card printings/versions along with official Block Icon "
             "(block_icon, nullable int reflecting the highest known printing block for Standard "
-            "rotation checks), active official banlist legality (ban_status, max_copies, "
+            "rotation checks), active official banlist legality (ban_status, effective max_copies "
+            "incorporating CR 5-1-2 Leader=1 and unlimited-copy=50 rules alongside banlist caps, "
             "paired_card_ids, restriction_note, effective_date), and any scheduled "
             "upcoming_restriction."
         ),
@@ -583,8 +584,9 @@ def create_server(
         name="card",
         description=(
             "Read-only canonical OPTCG card lookup by card_id (e.g. 'OP05-119', 'ST10-001', "
-            "'P-001'), including official block_icon, active official banlist legality, and any "
-            "scheduled upcoming_restriction."
+            "'P-001'), including official block_icon, active official banlist legality (with "
+            "effective max_copies respecting CR 5-1-2 deck rules), and any scheduled "
+            "upcoming_restriction."
         ),
         mime_type="application/json",
     )

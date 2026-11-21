@@ -9,15 +9,24 @@ from pathlib import Path
 import pytest
 
 from optcg_knowledge.cli import main as cli_main
-from optcg_knowledge.db import connect, get_meta
+from optcg_knowledge.db import (
+    LEADER_MAX_COPIES,
+    MAX_MAIN_DECK_COPIES,
+    connect,
+    get_meta,
+    has_unlimited_copies_rule,
+    resolve_card_max_copies,
+)
 from optcg_knowledge.ingest.banlist_parser import (
     ingest_banlist,
     parse_banlist_html,
     parse_banlist_json,
     parse_banlist_path,
 )
+from optcg_knowledge.ingest.cards_importer import ingest_cards
 from optcg_knowledge.ingest.embeddings import HashEmbedder
-from optcg_knowledge.search.queries import get_banlist, get_card, search_cards
+from optcg_knowledge.ingest.sources import LocalCardSource
+from optcg_knowledge.search.queries import get_banlist, get_card, get_cards, search_cards
 
 _REALISTIC_BANDAI_HTML = """\
 <!doctype html>
@@ -480,3 +489,211 @@ def test_cli_banlist_command_offline(
     with connect(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM card_restrictions").fetchone()[0]
         assert count == 5
+
+
+def test_card_max_copies_respects_unlimited_rule_overrides_and_leader_limits(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    tmp_path: Path,
+) -> None:
+    _, db_conn, _ = populated_db
+
+    # Unit checks for whitespace/case tolerance and non-matching "Under the rules" clauses.
+    assert has_unlimited_copies_rule(
+        "Under the rules of this game,\n  you may have any number of this card in your deck."
+    )
+    assert not has_unlimited_copies_rule(
+        "Under the rules of this game, you cannot include cards with a cost of 5 or more."
+    )
+    assert (
+        resolve_card_max_copies("legal", category="Leader", effect_text=None) == LEADER_MAX_COPIES
+    )
+    assert (
+        resolve_card_max_copies("banned", category="Leader", effect_text=None) == 0
+    )
+
+    # Ingest all four canonical unlimited-copy cards plus non-copy "Under the rules" cards.
+    override_cards_path = tmp_path / "override_cards.json"
+    override_cards_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "OP01-075",
+                    "name": "Pacifista",
+                    "rarity": "Common",
+                    "block_number": 1,
+                    "category": "Character",
+                    "colors": ["Blue"],
+                    "cost": 4,
+                    "power": 5000,
+                    "counter": None,
+                    "attributes": ["Special"],
+                    "types": ["Biological Weapon", "Navy"],
+                    "effect": (
+                        "Under the rules of this game, you may have any number of this card "
+                        "in your deck. [Blocker]"
+                    ),
+                },
+                {
+                    "id": "OP08-072",
+                    "name": "Biscuit Warrior",
+                    "rarity": "Common",
+                    "block_number": 2,
+                    "category": "Character",
+                    "colors": ["Purple"],
+                    "cost": 4,
+                    "power": 5000,
+                    "counter": 1000,
+                    "attributes": ["Slash"],
+                    "types": ["Big Mom Pirates"],
+                    "effect": (
+                        "Under the rules of this game, you may have any number of this card "
+                        "in your deck. [Blocker]"
+                    ),
+                },
+                {
+                    "id": "OP16-042",
+                    "name": "Prisoner of Impel Down",
+                    "rarity": "Common",
+                    "block_number": 4,
+                    "category": "Character",
+                    "colors": ["Blue"],
+                    "cost": 2,
+                    "power": 3000,
+                    "counter": 1000,
+                    "attributes": ["Strike"],
+                    "types": ["Impel Down"],
+                    "effect": (
+                        "Under the rules of this game, you may have any number of this card "
+                        "in your deck."
+                    ),
+                },
+                {
+                    "id": "OP18-093",
+                    "name": "Sleeptids",
+                    "rarity": "Common",
+                    "block_number": 4,
+                    "category": "Character",
+                    "colors": ["Black"],
+                    "cost": 3,
+                    "power": 4000,
+                    "counter": 1000,
+                    "attributes": ["Special"],
+                    "types": ["Animal"],
+                    "effect": (
+                        "Under the rules of this game, you may have any number of this card "
+                        "in your deck. [Blocker]"
+                    ),
+                },
+                {
+                    "id": "EB04-038",
+                    "name": "Rosinante & Law",
+                    "rarity": "SuperRare",
+                    "block_number": 4,
+                    "category": "Character",
+                    "colors": ["Blue"],
+                    "cost": 4,
+                    "power": 5000,
+                    "counter": 1000,
+                    "attributes": ["Slash"],
+                    "types": ["Donquixote Pirates"],
+                    "effect": (
+                        "Under the rules of this game, also treat this card's name as "
+                        "[Trafalgar Law] and [Donquixote Rosinante]."
+                    ),
+                },
+                {
+                    "id": "OP12-001",
+                    "name": "Silvers Rayleigh",
+                    "rarity": "Leader",
+                    "block_number": 3,
+                    "category": "Leader",
+                    "colors": ["Red"],
+                    "cost": 5,
+                    "power": 5000,
+                    "counter": None,
+                    "attributes": ["Slash"],
+                    "types": ["Former Roger Pirates"],
+                    "effect": (
+                        "Under the rules of this game, you cannot include cards with a cost "
+                        "of 5 or more in your deck."
+                    ),
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    ingest_cards(db_conn, LocalCardSource(override_cards_path))
+
+    # Legal baseline: unlimited-copy -> 50, normal Character -> 4, Leaders -> 1.
+    for cid in ("OP01-075", "OP08-072", "OP16-042", "OP18-093"):
+        res = get_card(db_conn, cid)
+        assert res["cards"][0]["ban_status"] == "legal"
+        assert res["cards"][0]["max_copies"] == MAX_MAIN_DECK_COPIES
+
+    assert get_card(db_conn, "EB04-038")["cards"][0]["max_copies"] == 4
+    assert get_card(db_conn, "OP05-119")["cards"][0]["max_copies"] == 4
+    for leader_id in ("OP01-001", "ST10-001", "OP12-001"):
+        leader_res = get_card(db_conn, leader_id)
+        assert leader_res["cards"][0]["category"] == "Leader"
+        assert leader_res["cards"][0]["max_copies"] == LEADER_MAX_COPIES
+
+    # Apply banlist restrictions testing precedence against unlimited-copy cards and Leaders.
+    doc, _ = parse_banlist_json(
+        {
+            "effective_date": "2026-10-12",
+            "upcoming_effective_date": "2026-11-27",
+            "restrictions": [
+                {"card_id": "OP01-075", "ban_status": "banned"},
+                {"card_id": "OP08-072", "ban_status": "restricted"},
+                {"card_id": "ST10-001", "ban_status": "banned"},
+            ],
+            "banned_pairs": [["OP16-042", "OP01-001"]],
+            "upcoming_banned_pairs": [["OP18-093", "OP12-001"]],
+        }
+    )
+    ingest_banlist(db_conn, doc)
+
+    # Batch get_cards reflects every precedence rule cleanly.
+    batch = get_cards(
+        db_conn,
+        ["OP01-075", "OP08-072", "OP16-042", "OP18-093", "OP01-001", "ST10-001", "OP12-001"],
+    )
+    by_id = {c["card_id"]: c for c in batch["cards"]}
+    assert by_id["OP01-075"]["ban_status"] == "banned"
+    assert by_id["OP01-075"]["max_copies"] == 0
+    assert by_id["OP08-072"]["ban_status"] == "restricted"
+    assert by_id["OP08-072"]["max_copies"] == 1
+    assert by_id["OP16-042"]["ban_status"] == "pair_banned"
+    assert by_id["OP16-042"]["max_copies"] == MAX_MAIN_DECK_COPIES
+    assert by_id["OP01-001"]["ban_status"] == "pair_banned"
+    assert by_id["OP01-001"]["max_copies"] == LEADER_MAX_COPIES
+    assert by_id["ST10-001"]["ban_status"] == "banned"
+    assert by_id["ST10-001"]["max_copies"] == 0
+    assert by_id["OP18-093"]["ban_status"] == "legal"
+    assert by_id["OP18-093"]["max_copies"] == MAX_MAIN_DECK_COPIES
+    assert by_id["OP18-093"]["upcoming_restriction"]["ban_status"] == "pair_banned"
+    assert by_id["OP18-093"]["upcoming_restriction"]["max_copies"] == MAX_MAIN_DECK_COPIES
+    assert by_id["OP12-001"]["ban_status"] == "legal"
+    assert by_id["OP12-001"]["max_copies"] == LEADER_MAX_COPIES
+    assert by_id["OP12-001"]["upcoming_restriction"]["ban_status"] == "pair_banned"
+    assert by_id["OP12-001"]["upcoming_restriction"]["max_copies"] == LEADER_MAX_COPIES
+
+    # search_cards returns identical effective max_copies.
+    pair_cards = {
+        c["card_id"]: c["max_copies"]
+        for c in search_cards(db_conn, ban_status="pair_banned")["cards"]
+    }
+    assert pair_cards == {"OP01-001": 1, "OP16-042": 50}
+
+    # get_banlist aligns active and upcoming max_copies with joined card rules.
+    banlist = get_banlist(db_conn)
+    active_max = {r["card_id"]: r["max_copies"] for r in banlist["restrictions"]}
+    assert active_max == {
+        "OP01-075": 0,
+        "ST10-001": 0,
+        "OP08-072": 1,
+        "OP01-001": 1,
+        "OP16-042": 50,
+    }
+    upcoming_max = {r["card_id"]: r["max_copies"] for r in banlist["upcoming"]["restrictions"]}
+    assert upcoming_max == {"OP12-001": 1, "OP18-093": 50}

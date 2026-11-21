@@ -4,7 +4,9 @@ from optcg_knowledge.db.connection import connect, open_db
 from optcg_knowledge.db.models import (
     AUTHORITY_BY_SOURCE,
     JUDGE_TIER_RANK,
+    LEADER_MAX_COPIES,
     MAX_COPIES_BY_BAN_STATUS,
+    MAX_MAIN_DECK_COPIES,
     VALID_BAN_STATUSES,
     ActiveBanStatus,
     BanStatus,
@@ -18,10 +20,12 @@ from optcg_knowledge.db.models import (
     TrmSectionRecord,
     authority_for_source,
     extract_block_icon_from_raw,
+    has_unlimited_copies_rule,
     judge_tier_rank,
     normalize_ban_status,
     normalize_block_icon,
     normalize_judge_tier,
+    resolve_card_max_copies,
 )
 from optcg_knowledge.db.schema import (
     SCHEMA_VERSION,
@@ -36,7 +40,9 @@ from optcg_knowledge.db.schema import (
 __all__ = [
     "AUTHORITY_BY_SOURCE",
     "JUDGE_TIER_RANK",
+    "LEADER_MAX_COPIES",
     "MAX_COPIES_BY_BAN_STATUS",
+    "MAX_MAIN_DECK_COPIES",
     "VALID_BAN_STATUSES",
     "ActiveBanStatus",
     "BanStatus",
@@ -54,6 +60,7 @@ __all__ = [
     "ensure_vec_table",
     "extract_block_icon_from_raw",
     "get_meta",
+    "has_unlimited_copies_rule",
     "init_schema",
     "judge_tier_rank",
     "migrate_schema",
@@ -61,6 +68,7 @@ __all__ = [
     "normalize_block_icon",
     "normalize_judge_tier",
     "open_db",
+    "resolve_card_max_copies",
     "set_meta",
     "utc_now_iso",
 ]
