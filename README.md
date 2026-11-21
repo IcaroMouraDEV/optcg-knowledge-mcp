@@ -173,7 +173,7 @@ Date: 2026-11-18
 
 ---
 
-## MCP Tools & Prompts
+## MCP Tools, Resources & Prompts
 
 | Category | Name | Purpose |
 | :--- | :--- | :--- |
@@ -193,6 +193,18 @@ Date: 2026-11-18
 | **Interop** | `export_rulings` | Export vetted rulings using the exact same versioned JSON schema as the CLI |
 | **Prompt** | `juiz` | OPTCG rules judge workflow citing authority, exact IDs, banlist legality, conflicts, and staleness |
 | **Prompt** | `curar(arquivo)` | Anonymized judge chat curation workflow targeting `data/raw/judge_chats/<arquivo>` |
+
+### Read-Only MCP Resources (`optcg://...`)
+
+Clients that support attaching MCP Resources directly (e.g., via `@`-mentions) can read structured `application/json` payloads without invoking a tool:
+
+| Resource URI | Kind | Delegates To | Purpose |
+| :--- | :--- | :--- | :--- |
+| `optcg://status` | Static | `get_status()` | Database versions, counts, embedding coverage, and ingestion timestamps |
+| `optcg://banlist` | Static | `get_banlist()` | Active and upcoming official Bandai banlist / card restrictions |
+| `optcg://rules/{rule_id}` | Template | `get_rule(rule_id)` | Comprehensive Rule by `rule_id` (e.g., `optcg://rules/7-1-4-1`) with ancestors and ordered children |
+| `optcg://trm/{section_id}` | Template | `get_trm_section(section_id)` | Tournament Rules Manual section by `section_id` (e.g., `optcg://trm/TRM-7.4.1`) with ancestors and children |
+| `optcg://cards/{card_id}` | Template | `get_card(card_id)` | Canonical card by `card_id` (e.g., `optcg://cards/OP05-119`) with active banlist legality and `upcoming_restriction` |
 
 ---
 

@@ -1,4 +1,4 @@
-"""MCP stdio server exposing OPTCG hybrid search, structured queries, and prompts."""
+"""MCP stdio server exposing OPTCG hybrid search, structured queries, resources, and prompts."""
 
 from __future__ import annotations
 
@@ -164,7 +164,7 @@ def create_server(
     embedder: Embedder | None = None,
     search_mode: str | None = None,
 ) -> MCPServer:
-    """Create and configure the `optcg-knowledge` MCP server with all tools and prompts."""
+    """Create and configure the `optcg-knowledge` MCP server with tools, resources, and prompts."""
     resolved_settings = settings or get_settings(
         db_path=db_path,
         search_mode=search_mode,
@@ -194,8 +194,10 @@ def create_server(
             "Tournament Rules Manual (TRM), canonical cards (single get_card, batch paginated "
             "get_cards, and filtered search_cards), official Bandai banlist / card restrictions "
             "(via get_banlist, get_card, get_cards, and search_cards), official FAQs/errata, "
-            "judge rulings (via get_card_rulings, get_rule_rulings, and hybrid search), and "
-            "database health/freshness diagnostics (via get_status). Authority hierarchy: "
+            "judge rulings (via get_card_rulings, get_rule_rulings, and hybrid search), "
+            "database health/freshness diagnostics (via get_status), and read-only MCP resources "
+            "(optcg://status, optcg://banlist, optcg://rules/{rule_id}, optcg://trm/{section_id}, "
+            "and optcg://cards/{card_id}). Authority hierarchy: "
             "1=rules/tournament_rules > 2=official_faq/errata > 3=judge > 4=community."
         ),
     )
@@ -512,6 +514,75 @@ def create_server(
                 include_superseded=include_superseded,
                 include_unreviewed=include_unreviewed,
             )
+
+    @server.resource(
+        "optcg://status",
+        name="status",
+        description=(
+            "Read-only OPTCG knowledge base health and freshness diagnostics (schema_version, "
+            "rules_version, trm_version, banlist effective dates, embedding model/coverage, "
+            "table/authority/tier counts, and ingestion timestamps)."
+        ),
+        mime_type="application/json",
+    )
+    def resource_status() -> dict[str, Any]:
+        """Return database health and freshness diagnostics via `optcg://status`."""
+        return get_status()
+
+    @server.resource(
+        "optcg://banlist",
+        name="banlist",
+        description=(
+            "Read-only official Bandai OPTCG banlist / card restrictions separating active "
+            "restrictions (counts, banned_pairs, restrictions) from scheduled upcoming "
+            "announcements."
+        ),
+        mime_type="application/json",
+    )
+    def resource_banlist() -> dict[str, Any]:
+        """Return the active and upcoming official Bandai banlist via `optcg://banlist`."""
+        return get_banlist()
+
+    @server.resource(
+        "optcg://rules/{rule_id}",
+        name="rule",
+        description=(
+            "Read-only OPTCG Comprehensive Rule lookup by canonical rule_id (e.g. '7-1-4' or "
+            "'7-1-4-1'), including its ancestor chain and ordered descendant sub-rules."
+        ),
+        mime_type="application/json",
+    )
+    def resource_rule(rule_id: str) -> dict[str, Any]:
+        """Return a Comprehensive Rule and its ordered descendants via `optcg://rules/{rule_id}`."""
+        return get_rule(rule_id, include_children=True)
+
+    @server.resource(
+        "optcg://trm/{section_id}",
+        name="trm_section",
+        description=(
+            "Read-only official Bandai Tournament Rules Manual (TRM) section lookup by "
+            "section_id (e.g. 'TRM-7.4.1', 'TRM-7.4.1.2', or '7.4.1'), including its ancestor "
+            "chain and ordered descendant subsections/infractions."
+        ),
+        mime_type="application/json",
+    )
+    def resource_trm_section(section_id: str) -> dict[str, Any]:
+        """Return a TRM section and its ordered descendants via `optcg://trm/{section_id}`."""
+        return get_trm_section(section_id, include_children=True)
+
+    @server.resource(
+        "optcg://cards/{card_id}",
+        name="card",
+        description=(
+            "Read-only canonical OPTCG card lookup by card_id (e.g. 'OP05-119', 'ST10-001', "
+            "'P-001'), including active official banlist legality and any scheduled "
+            "upcoming_restriction."
+        ),
+        mime_type="application/json",
+    )
+    def resource_card(card_id: str) -> dict[str, Any]:
+        """Return canonical card details and banlist legality via `optcg://cards/{card_id}`."""
+        return get_card(card_id)
 
     @server.prompt(
         name="juiz",
