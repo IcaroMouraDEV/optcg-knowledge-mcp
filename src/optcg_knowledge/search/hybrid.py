@@ -39,6 +39,10 @@ EXACT_KEYWORD_RULE_MAX_BOOST = 0.032
 EXACT_KEYWORD_RULE_HEADING_BOOST = 0.008
 
 AUTHORITY_STEP_BOOST = 0.0025
+# Additional structural preference for canonical rules/TRM (authority=1) on conceptual
+# queries without an explicit card_id so card-specific FAQs (authority=2) do not crowd
+# out general Comprehensive Rules in top-3.
+CONCEPTUAL_RULE_BOOST = 0.0060
 # Intra-authority tie-breaking within authority = 3 (strictly < AUTHORITY_STEP_BOOST).
 JUDGE_TIER_BOOST: dict[str, float] = {
     "tier_0": 0.00045,
@@ -565,7 +569,12 @@ def _collect_vector_matches(
     return True
 
 
-def _compute_score(candidate: _Candidate, *, used_vector: bool) -> float:
+def _compute_score(
+    candidate: _Candidate,
+    *,
+    used_vector: bool,
+    has_card_id: bool = False,
+) -> float:
     score = 0.0
     if candidate.bm25_rank is not None:
         bm25_weight = (
@@ -582,6 +591,8 @@ def _compute_score(candidate: _Candidate, *, used_vector: bool) -> float:
     # purely via authority weight on conceptual queries (exact card lookups use EXACT_DOC_ID_BOOST).
     effective_authority = 2 if candidate.doc_type == "card" else candidate.authority
     score += (5 - effective_authority) * AUTHORITY_STEP_BOOST
+    if not has_card_id and candidate.doc_type in ("rule", "tournament_rule"):
+        score += CONCEPTUAL_RULE_BOOST
     if candidate.authority == 3 and candidate.ruling_judge_tier:
         score += JUDGE_TIER_BOOST.get(candidate.ruling_judge_tier, 0.0)
     return score
@@ -666,13 +677,17 @@ def hybrid_search(
             limit=candidate_limit,
         )
 
+    has_card_id = bool(tokens.card_ids)
     _apply_keyword_boosts(
         candidates,
         tokens.keywords,
-        has_card_id=bool(tokens.card_ids),
+        has_card_id=has_card_id,
     )
 
-    scored = [(_compute_score(cand, used_vector=used_vector), cand) for cand in candidates.values()]
+    scored = [
+        (_compute_score(cand, used_vector=used_vector, has_card_id=has_card_id), cand)
+        for cand in candidates.values()
+    ]
     scored.sort(
         key=lambda item: (
             -item[0],

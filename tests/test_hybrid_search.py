@@ -359,3 +359,175 @@ def test_authority_and_judge_tier_hierarchy_preserved_strictly(
         "judge:prio:t1",
         "community:prio:1",
     ]
+
+
+def test_ptbr_glossary_expands_relaxed_fts_without_mutating_strict_or_english_queries() -> None:
+    """PT-BR glossary expands relaxed OR queries only, preserving strict AND and EN queries."""
+    strict_pt, relaxed_pt = build_fts_queries(
+        "Como funcionam efeitos de substituição que dizem em vez disso?"
+    )
+    assert strict_pt is not None
+    assert '"replacement"' not in strict_pt
+    assert '"instead"' not in strict_pt
+    assert relaxed_pt is not None
+    assert '"replacement effects"' in relaxed_pt
+    assert '"instead"' in relaxed_pt
+
+    # Polysemy safety: "pedido de recurso" -> appeal (NOT DON!!); "cartas de recurso" -> DON!!
+    _, relaxed_appeal = build_fts_queries(
+        "Como funciona o pedido de recurso para chamar o juiz-chefe?"
+    )
+    assert relaxed_appeal is not None
+    assert '"Appeals"' in relaxed_appeal
+    assert '"Head Judge"' in relaxed_appeal
+    assert '"DON!!"' not in relaxed_appeal
+
+    _, relaxed_don = build_fts_queries(
+        "Quantas cartas de recurso o jogador compra na fase de compra no primeiro turno?"
+    )
+    assert relaxed_don is not None
+    assert '"DON!!"' in relaxed_don
+    assert '"Draw Phase"' in relaxed_don
+    assert '"first turn"' in relaxed_don
+    assert '"Appeals"' not in relaxed_don
+
+    # Single-word PT-BR queries get a relaxed glossary fallback; single English/ID tokens do not.
+    strict_single_pt, relaxed_single_pt = build_fts_queries("baralho")
+    assert strict_single_pt == '"baralho"'
+    assert relaxed_single_pt == '"baralho" OR "deck"'
+
+    strict_single_en, relaxed_single_en = build_fts_queries("OP05-119")
+    assert strict_single_en == '"OP05-119"'
+    assert relaxed_single_en is None
+
+    # Pure English queries must not trigger Portuguese glossary expansions.
+    strict_en, relaxed_en = build_fts_queries(
+        "When the attacking Leader power is greater than or equal to the opponent Leader?"
+    )
+    assert strict_en is not None
+    assert relaxed_en is not None
+    assert relaxed_en == (
+        '"attacking" OR "Leader" OR "power" OR "greater" OR "than" OR "equal" OR "opponent"'
+    )
+
+
+def test_pure_ptbr_lexical_fallback_retrieves_english_rules_offline(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+) -> None:
+    """Pure PT-BR queries without English anglicisms must retrieve English rules lexically."""
+    _, conn, _ = populated_db
+
+    precedence = hybrid_search(
+        conn,
+        "Quando o texto de uma carta contradiz o manual de regras gerais, qual prevalece?",
+        embedder=None,
+        k=5,
+    )
+    assert precedence["search_mode"] == "lexical_only"
+    assert precedence["results"]
+    assert precedence["results"][0]["doc_type"] == "rule"
+    assert precedence["results"][0]["doc_id"] == "1-3-1"
+
+    zero_life = hybrid_search(
+        conn,
+        (
+            "O que acontece quando o ataque tem poder igual ou maior contra "
+            "um líder sem cartas de vida?"
+        ),
+        embedder=None,
+        k=5,
+    )
+    top_life_ids = [r["doc_id"] for r in zero_life["results"][:3]]
+    assert any(doc_id.startswith("7-1-4-1") for doc_id in top_life_ids)
+
+    blocker = hybrid_search(
+        conn,
+        "Como funciona a habilidade de bloquear e redirecionar um ataque para outro personagem?",
+        embedder=None,
+        k=5,
+    )
+    top_blocker_ids = [r["doc_id"] for r in blocker["results"][:3]]
+    assert any(doc_id in {"10-1-1", "7-1-2-1"} for doc_id in top_blocker_ids)
+
+
+def test_conceptual_query_prioritizes_rules_over_card_faqs_without_hurting_card_lookups(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+) -> None:
+    """Conceptual queries without card_id must favor authority=1 rules over card-specific FAQs."""
+    import struct
+
+    _, conn, embedder = populated_db
+
+    # Add 3 card-specific FAQs for OP04-083 whose wording mirrors a general Life/damage question.
+    for idx in range(3):
+        insert_test_ruling(
+            conn,
+            ruling_id=f"faq:conceptual:noise-{idx}",
+            question=(
+                "If OP04-083 Sabo attacks an opposing Leader with 0 Life, "
+                "does dealing damage win the game?"
+            ),
+            answer=(
+                "Yes. When OP04-083 deals damage to an opponent Leader with 0 Life, "
+                "the attacking player wins the game."
+            ),
+            source="official_faq",
+            authority=2,
+            date="2025-09-10",
+            rules_version="1.24",
+            reviewed=True,
+            card_ids=["OP04-083"],
+        )
+    embed_chunks(conn, embedder, batch_size=8)
+
+    # Craft a deterministic query vector matching the FAQ cluster slightly closer than rule
+    # 7-1-4-1-1-1 so vector-only ranking places all 3 FAQs ahead of the rule.
+    faq_row = conn.execute(
+        "SELECT v.embedding FROM chunks c JOIN chunks_vec v ON v.rowid = c.rowid "
+        "WHERE c.doc_type = 'ruling' AND c.doc_id = 'faq:conceptual:noise-0'"
+    ).fetchone()
+    rule_row = conn.execute(
+        "SELECT v.embedding FROM chunks c JOIN chunks_vec v ON v.rowid = c.rowid "
+        "WHERE c.doc_type = 'rule' AND c.doc_id = '7-1-4-1-1-1'"
+    ).fetchone()
+    assert faq_row is not None and rule_row is not None
+
+    faq_vec = list(struct.unpack("<64f", faq_row["embedding"]))
+    rule_vec = list(struct.unpack("<64f", rule_row["embedding"]))
+    blended = [0.75 * fv + 0.25 * rv for fv, rv in zip(faq_vec, rule_vec, strict=True)]
+    norm = sum(x * x for x in blended) ** 0.5
+    query_vec = [x / norm for x in blended]
+
+    class _FaqBiasedEmbedder:
+        model_name = "test/hash-embedder"
+        dimension = 64
+
+        def embed_passages(self, texts: list[str]) -> list[list[float]]:
+            return [query_vec for _ in texts]
+
+        def embed_query(self, query: str) -> list[float]:
+            return query_vec
+
+    # Conceptual pure PT-BR query (no card_id): authority=1 rule must beat card-specific FAQs.
+    conceptual = hybrid_search(
+        conn,
+        "O que acontece quando o ataque atinge um líder sem cartas de vida?",
+        embedder=_FaqBiasedEmbedder(),
+        k=6,
+    )
+    assert conceptual["search_mode"] == "hybrid"
+    assert conceptual["results"][0]["doc_type"] == "rule"
+    assert conceptual["results"][0]["authority"] == 1
+    assert any(r["doc_id"].startswith("7-1-4-1") for r in conceptual["results"][:3])
+
+    # Card-specific query (explicit OP04-083): card stays #1 and its linked FAQ ranks #2.
+    card_specific = hybrid_search(
+        conn,
+        "OP04-083 Leader 0 Life damage",
+        embedder=_FaqBiasedEmbedder(),
+        k=6,
+    )
+    assert card_specific["results"][0]["doc_type"] == "card"
+    assert card_specific["results"][0]["doc_id"] == "OP04-083"
+    assert card_specific["results"][1]["doc_type"] == "ruling"
+    assert card_specific["results"][1]["doc_id"].startswith("faq:conceptual:noise-")
