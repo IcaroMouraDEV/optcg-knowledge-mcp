@@ -26,6 +26,118 @@ _FTS_TOKEN_RE = re.compile(
     re.UNICODE,
 )
 
+# High-frequency English and Portuguese function words stripped only from relaxed (OR)
+# FTS5 fallback queries so boilerplate tokens do not drown out semantic/exact hits.
+_RELAXED_FTS_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # English
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "can",
+        "do",
+        "does",
+        "for",
+        "from",
+        "has",
+        "have",
+        "how",
+        "i",
+        "if",
+        "in",
+        "is",
+        "it",
+        "its",
+        "may",
+        "my",
+        "no",
+        "not",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "them",
+        "they",
+        "this",
+        "to",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "with",
+        "would",
+        "you",
+        "your",
+        # Portuguese (PT-BR, excluding terms already listed above such as "a", "as", "do", "no")
+        "ao",
+        "aos",
+        "com",
+        "como",
+        "da",
+        "das",
+        "de",
+        "dos",
+        "e",
+        "é",
+        "ela",
+        "elas",
+        "ele",
+        "eles",
+        "em",
+        "entre",
+        "essa",
+        "esse",
+        "esta",
+        "este",
+        "eu",
+        "foi",
+        "mais",
+        "mas",
+        "me",
+        "meu",
+        "minha",
+        "na",
+        "nas",
+        "nos",
+        "o",
+        "os",
+        "ou",
+        "para",
+        "pela",
+        "pelas",
+        "pelo",
+        "pelos",
+        "por",
+        "posso",
+        "qual",
+        "quais",
+        "quando",
+        "que",
+        "quem",
+        "são",
+        "se",
+        "sem",
+        "ser",
+        "seu",
+        "sua",
+        "também",
+        "tem",
+        "ter",
+        "um",
+        "uma",
+        "umas",
+        "uns",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DetectedTokens:
@@ -116,30 +228,56 @@ def _quote_fts_term(term: str) -> str | None:
     return f'"{escaped}"'
 
 
+def _is_relaxed_stopword(raw_term: str) -> bool:
+    """Return True for high-frequency EN/PT-BR function words in relaxed OR fallback queries."""
+    cleaned = raw_term.strip()
+    if not cleaned:
+        return True
+    # Preserve bracketed keywords, structured IDs (card/rule/TRM), and numbers.
+    if cleaned.startswith("[") or "-" in cleaned or "." in cleaned or cleaned.isdigit():
+        return False
+    if len(cleaned) <= 1:
+        return True
+    return cleaned.lower() in _RELAXED_FTS_STOPWORDS
+
+
 def build_fts_queries(query: str) -> tuple[str | None, str | None]:
     """Build crash-safe ``(strict_and, relaxed_or)`` FTS5 MATCH queries from raw user input.
 
     Every extracted token is quoted so hyphens (``OP05-119``, ``7-1-4``), brackets
     (``[On K.O.]``), exclamation marks (``[DON!! x1]``), colons, and FTS operators
     (``NOT``, ``OR``, ``NEAR``) never trigger ``sqlite3.OperationalError``.
+
+    ``strict_and`` retains all tokens for exact English/literal precision, while
+    ``relaxed_or`` filters ultra-common EN/PT-BR stopwords (falling back to all tokens
+    if filtering would leave none) to reduce noise on mixed-language queries.
     """
     if not query or not query.strip():
         return (None, None)
 
     quoted_terms: list[str] = []
+    relaxed_terms: list[str] = []
     seen: set[str] = set()
     for match in _FTS_TOKEN_RE.finditer(query):
-        quoted = _quote_fts_term(match.group(0))
+        raw_token = match.group(0)
+        quoted = _quote_fts_term(raw_token)
         if quoted is None:
             continue
         dedup_key = quoted.lower()
         if dedup_key not in seen:
             seen.add(dedup_key)
             quoted_terms.append(quoted)
+            if not _is_relaxed_stopword(raw_token):
+                relaxed_terms.append(quoted)
 
     if not quoted_terms:
         return (None, None)
 
     strict_query = " AND ".join(quoted_terms)
-    relaxed_query = " OR ".join(quoted_terms) if len(quoted_terms) > 1 else None
+    if len(quoted_terms) == 1:
+        relaxed_query = None
+    elif relaxed_terms:
+        relaxed_query = " OR ".join(relaxed_terms)
+    else:
+        relaxed_query = " OR ".join(quoted_terms)
     return (strict_query, relaxed_query)

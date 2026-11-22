@@ -23,17 +23,27 @@ logger = logging.getLogger(__name__)
 VALID_DOC_TYPES = frozenset({"rule", "ruling", "card", "tournament_rule"})
 
 RRF_K = 60
+BM25_STRICT_WEIGHT = 1.0
+BM25_RELAXED_HYBRID_WEIGHT = 0.20
+VEC_RRF_WEIGHT = 1.25
+
 EXACT_DOC_ID_BOOST = 0.12
 EXACT_RULE_PREFIX_BOOST = 0.05
 EXACT_LINKED_RULING_BOOST = 0.045
-EXACT_KEYWORD_BOOST = 0.035
-EXACT_KEYWORD_MAX_BOOST = 0.07
-AUTHORITY_STEP_BOOST = 0.0005
+# Keyword boosts stay below max RRF so semantic/lexical relevance remains decisive,
+# while prioritizing canonical Comprehensive Rules on conceptual (no card_id) queries.
+EXACT_KEYWORD_BOOST = 0.008
+EXACT_KEYWORD_MAX_BOOST = 0.016
+EXACT_KEYWORD_RULE_BOOST = 0.020
+EXACT_KEYWORD_RULE_MAX_BOOST = 0.032
+EXACT_KEYWORD_RULE_HEADING_BOOST = 0.008
+
+AUTHORITY_STEP_BOOST = 0.0025
 # Intra-authority tie-breaking within authority = 3 (strictly < AUTHORITY_STEP_BOOST).
 JUDGE_TIER_BOOST: dict[str, float] = {
-    "tier_0": 0.00015,
-    "tier_2": 0.00010,
-    "tier_1": 0.00005,
+    "tier_0": 0.00045,
+    "tier_2": 0.00030,
+    "tier_1": 0.00015,
 }
 
 
@@ -54,6 +64,7 @@ class _Candidate:
     ruling_url: str | None
     ruling_judge_tier: str | None = None
     bm25_rank: int | None = None
+    bm25_is_relaxed: bool = False
     vec_rank: int | None = None
     exact_boost: float = 0.0
     signals: list[str] = field(default_factory=list)
@@ -355,27 +366,55 @@ def _collect_exact_matches(
             cand.add_signal("exact_trm_prefix")
 
     if tokens.keywords:
-        keyword_hits: dict[int, int] = {}
         for keyword in tokens.keywords:
             rows = conn.execute(
                 f"""
                 {_BASE_SELECT}
                 WHERE INSTR(LOWER(c.text), LOWER(?)) > 0
                   AND ({filter_sql})
-                ORDER BY c.authority ASC, c.rowid ASC
+                ORDER BY
+                    CASE c.doc_type
+                        WHEN 'rule' THEN 0
+                        WHEN 'tournament_rule' THEN 1
+                        WHEN 'ruling' THEN 2
+                        ELSE 3
+                    END ASC,
+                    c.authority ASC,
+                    c.rowid ASC
                 LIMIT ?
                 """,
                 [keyword, *filter_params, keyword_limit],
             ).fetchall()
             for row in rows:
-                cand = _register_candidate(candidates, row)
-                keyword_hits[cand.rowid] = keyword_hits.get(cand.rowid, 0) + 1
-                cand.add_signal("exact_keyword")
+                _register_candidate(candidates, row)
 
-        for rowid, hit_count in keyword_hits.items():
-            cand = candidates[rowid]
-            bonus = min(EXACT_KEYWORD_MAX_BOOST, hit_count * EXACT_KEYWORD_BOOST)
-            cand.exact_boost += bonus
+
+def _apply_keyword_boosts(
+    candidates: dict[int, _Candidate],
+    keywords: tuple[str, ...],
+    *,
+    has_card_id: bool,
+) -> None:
+    """Apply authority- and context-aware boosts to candidates containing queried keywords."""
+    if not keywords:
+        return
+
+    lowered_keywords = [kw.lower() for kw in keywords]
+    for cand in candidates.values():
+        lowered_text = cand.text.lower()
+        hits = sum(1 for kw in lowered_keywords if kw in lowered_text)
+        if hits <= 0:
+            continue
+
+        cand.add_signal("exact_keyword")
+        if not has_card_id and cand.doc_type == "rule":
+            bonus = min(EXACT_KEYWORD_RULE_MAX_BOOST, hits * EXACT_KEYWORD_RULE_BOOST)
+            first_line = lowered_text.splitlines()[0] if lowered_text else ""
+            if any(kw in first_line for kw in lowered_keywords):
+                bonus += EXACT_KEYWORD_RULE_HEADING_BOOST
+        else:
+            bonus = min(EXACT_KEYWORD_MAX_BOOST, hits * EXACT_KEYWORD_BOOST)
+        cand.exact_boost += bonus
 
 
 def _collect_bm25_matches(
@@ -392,7 +431,7 @@ def _collect_bm25_matches(
         return
 
     seen_rowids: set[int] = set()
-    ordered_rows: list[sqlite3.Row] = []
+    ordered_rows: list[tuple[sqlite3.Row, bool]] = []
 
     def _run_fts(match_expr: str, fetch_limit: int) -> list[sqlite3.Row]:
         try:
@@ -415,20 +454,21 @@ def _collect_bm25_matches(
         rowid = int(row["rowid"])
         if rowid not in seen_rowids:
             seen_rowids.add(rowid)
-            ordered_rows.append(row)
+            ordered_rows.append((row, False))
 
     if len(ordered_rows) < limit and relaxed_fts is not None:
         for row in _run_fts(relaxed_fts, limit):
             rowid = int(row["rowid"])
             if rowid not in seen_rowids:
                 seen_rowids.add(rowid)
-                ordered_rows.append(row)
+                ordered_rows.append((row, True))
                 if len(ordered_rows) >= limit:
                     break
 
-    for rank, row in enumerate(ordered_rows, start=1):
+    for rank, (row, is_relaxed) in enumerate(ordered_rows, start=1):
         cand = _register_candidate(candidates, row)
         cand.bm25_rank = rank
+        cand.bm25_is_relaxed = is_relaxed
         cand.add_signal("bm25")
 
 
@@ -485,7 +525,7 @@ def _collect_vector_matches(
             f"Query vector dimension {len(query_vector)} != embedder.dimension {embedder.dimension}"
         )
 
-    vec_k = min(total_vectors, max(limit * 2, 64))
+    vec_k = min(total_vectors, max(limit * 3, 120))
     vec_rows = conn.execute(
         """
         SELECT rowid, distance
@@ -525,15 +565,23 @@ def _collect_vector_matches(
     return True
 
 
-def _compute_score(candidate: _Candidate) -> float:
+def _compute_score(candidate: _Candidate, *, used_vector: bool) -> float:
     score = 0.0
     if candidate.bm25_rank is not None:
-        score += 1.0 / (RRF_K + candidate.bm25_rank)
+        bm25_weight = (
+            BM25_RELAXED_HYBRID_WEIGHT
+            if used_vector and candidate.bm25_is_relaxed
+            else BM25_STRICT_WEIGHT
+        )
+        score += bm25_weight / (RRF_K + candidate.bm25_rank)
     if candidate.vec_rank is not None:
-        score += 1.0 / (RRF_K + candidate.vec_rank)
+        score += VEC_RRF_WEIGHT / (RRF_K + candidate.vec_rank)
     score += candidate.exact_boost
-    # Gentle authority tie-breaker: 1=rules > 2=official_faq/errata > 3=judge > 4=community
-    score += (5 - candidate.authority) * AUTHORITY_STEP_BOOST
+    # Authority hierarchy: 1=rules/tournament_rules > 2=official_faq/errata > 3=judge > 4=community.
+    # Card chunks store authority=1 as official game text, but should not outrank rules/TRM
+    # purely via authority weight on conceptual queries (exact card lookups use EXACT_DOC_ID_BOOST).
+    effective_authority = 2 if candidate.doc_type == "card" else candidate.authority
+    score += (5 - effective_authority) * AUTHORITY_STEP_BOOST
     if candidate.authority == 3 and candidate.ruling_judge_tier:
         score += JUDGE_TIER_BOOST.get(candidate.ruling_judge_tier, 0.0)
     return score
@@ -584,7 +632,7 @@ def hybrid_search(
         min_authority=validated_min_auth,
         include_superseded=include_superseded,
     )
-    candidate_limit = max(k * 5, 40)
+    candidate_limit = max(k * 6, 50)
     candidates: dict[int, _Candidate] = {}
 
     _collect_exact_matches(
@@ -618,20 +666,13 @@ def hybrid_search(
             limit=candidate_limit,
         )
 
-    # Also boost any candidate found by BM25/vector that contains queried bracketed keywords
-    # even if it fell outside the keyword-only LIMIT cap.
-    if tokens.keywords:
-        lowered_keywords = [kw.lower() for kw in tokens.keywords]
-        for cand in candidates.values():
-            if "exact_keyword" in cand.signals:
-                continue
-            lowered_text = cand.text.lower()
-            hits = sum(1 for kw in lowered_keywords if kw in lowered_text)
-            if hits > 0:
-                cand.exact_boost += min(EXACT_KEYWORD_MAX_BOOST, hits * EXACT_KEYWORD_BOOST)
-                cand.add_signal("exact_keyword")
+    _apply_keyword_boosts(
+        candidates,
+        tokens.keywords,
+        has_card_id=bool(tokens.card_ids),
+    )
 
-    scored = [(_compute_score(cand), cand) for cand in candidates.values()]
+    scored = [(_compute_score(cand, used_vector=used_vector), cand) for cand in candidates.values()]
     scored.sort(
         key=lambda item: (
             -item[0],
