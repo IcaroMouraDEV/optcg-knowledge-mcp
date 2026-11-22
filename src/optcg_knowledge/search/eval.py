@@ -32,6 +32,7 @@ VALID_ASSERTION_TYPES = frozenset(
 _DISCORD_MENTION_RE = re.compile(r"<@!?\d{15,22}>")
 _AT_HANDLE_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_.-]{2,32}\b")
 _DISCORD_DISCRIMINATOR_RE = re.compile(r"\b[A-Za-z0-9_.-]{2,32}#\d{4}\b")
+_TAG_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
 
 class EvalDatasetError(ValueError):
@@ -136,6 +137,7 @@ class EvalCase:
     include_superseded: bool = False
     authority_checks: tuple[AuthorityAssertion, ...] = ()
     notes: str | None = None
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +187,7 @@ class CaseEvalResult:
     total_targets: int
     top_doc_ids: tuple[str, ...]
     assertions: tuple[AssertionOutcome, ...] = ()
+    tags: tuple[str, ...] = ()
 
     @property
     def authority_passed(self) -> bool:
@@ -195,6 +198,7 @@ class CaseEvalResult:
             "case_id": self.case_id,
             "lang": self.lang,
             "category": self.category,
+            "tags": list(self.tags),
             "query": self.query,
             "search_mode": self.search_mode,
             "recall_at_3": round(self.recall_at_3, 4),
@@ -250,6 +254,7 @@ class ModeEvalSummary:
     by_lang: dict[str, MetricSlice]
     by_category: dict[str, MetricSlice]
     cases: tuple[CaseEvalResult, ...]
+    by_tag: dict[str, MetricSlice] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -258,6 +263,7 @@ class ModeEvalSummary:
             "metrics": self.metrics.to_dict(),
             "by_lang": {lang: sl.to_dict() for lang, sl in sorted(self.by_lang.items())},
             "by_category": {cat: sl.to_dict() for cat, sl in sorted(self.by_category.items())},
+            "by_tag": {tag: sl.to_dict() for tag, sl in sorted(self.by_tag.items())},
             "cases": [case.to_dict() for case in self.cases],
         }
 
@@ -337,6 +343,12 @@ class EvalReport:
             for cat, sl in sorted(summary.by_category.items()):
                 lines.append(
                     f"    cat={cat:<7} ({sl.cases_total:>2}): "
+                    f"Recall@3={sl.recall_at_3:.3f}  Recall@8={sl.recall_at_8:.3f}  "
+                    f"MRR={sl.mrr:.3f}"
+                )
+            for tag, sl in sorted(summary.by_tag.items()):
+                lines.append(
+                    f"    tag={tag:<10} ({sl.cases_total:>2}): "
                     f"Recall@3={sl.recall_at_3:.3f}  Recall@8={sl.recall_at_8:.3f}  "
                     f"MRR={sl.mrr:.3f}"
                 )
@@ -558,6 +570,22 @@ def parse_eval_dataset(payload: dict[str, Any], *, source_path: Path | None = No
             for c_idx, raw_chk in enumerate(raw_checks)
         )
 
+        raw_tags = raw_case.get("tags", [])
+        if not isinstance(raw_tags, list):
+            raise EvalDatasetError(f"case {case_id!r} tags must be a list of strings.")
+        validated_tags: list[str] = []
+        for t_idx, raw_tag in enumerate(raw_tags):
+            if not isinstance(raw_tag, str):
+                raise EvalDatasetError(f"case {case_id!r} tags[{t_idx}] must be a string.")
+            cleaned_tag = raw_tag.strip().lower()
+            if not _TAG_SLUG_RE.match(cleaned_tag):
+                raise EvalDatasetError(
+                    f"case {case_id!r} tags[{t_idx}] must be a lowercase slug "
+                    f"(alphanumeric, '-', '_'); got {raw_tag!r}"
+                )
+            if cleaned_tag not in validated_tags:
+                validated_tags.append(cleaned_tag)
+
         cases.append(
             EvalCase(
                 case_id=case_id,
@@ -570,6 +598,7 @@ def parse_eval_dataset(payload: dict[str, Any], *, source_path: Path | None = No
                 include_superseded=include_superseded,
                 authority_checks=checks,
                 notes=notes.strip() if isinstance(notes, str) and notes.strip() else None,
+                tags=tuple(validated_tags),
             )
         )
 
@@ -797,6 +826,7 @@ def _evaluate_case(
         total_targets=total_targets,
         top_doc_ids=tuple(str(r["doc_id"]) for r in results[:k_eval]),
         assertions=assertions,
+        tags=case.tags,
     )
 
 
@@ -836,11 +866,14 @@ def _summarize_mode(mode: EvalMode, case_results: Sequence[CaseEvalResult]) -> M
     effective_modes: dict[str, int] = {}
     by_lang_groups: dict[str, list[CaseEvalResult]] = {}
     by_cat_groups: dict[str, list[CaseEvalResult]] = {}
+    by_tag_groups: dict[str, list[CaseEvalResult]] = {}
 
     for res in case_results:
         effective_modes[res.search_mode] = effective_modes.get(res.search_mode, 0) + 1
         by_lang_groups.setdefault(res.lang, []).append(res)
         by_cat_groups.setdefault(res.category, []).append(res)
+        for tag in res.tags:
+            by_tag_groups.setdefault(tag, []).append(res)
 
     return ModeEvalSummary(
         mode=mode,
@@ -849,6 +882,7 @@ def _summarize_mode(mode: EvalMode, case_results: Sequence[CaseEvalResult]) -> M
         by_lang={lang: _aggregate_slice(items) for lang, items in by_lang_groups.items()},
         by_category={cat: _aggregate_slice(items) for cat, items in by_cat_groups.items()},
         cases=tuple(case_results),
+        by_tag={tag: _aggregate_slice(items) for tag, items in by_tag_groups.items()},
     )
 
 
@@ -897,6 +931,7 @@ def run_retrieval_eval(
     embedder: Embedder | None = None,
     k: int = 8,
     lang: str | None = None,
+    tag: str | None = None,
     dataset_name: str | None = None,
     dataset_path: Path | None = None,
 ) -> EvalReport:
@@ -909,7 +944,21 @@ def run_retrieval_eval(
     if lang is not None and lang not in VALID_LANGS:
         raise ValueError(f"Unsupported lang filter {lang!r}; expected one of {sorted(VALID_LANGS)}")
 
-    filtered_cases = [c for c in cases if lang is None or c.lang == lang]
+    normalized_tag: str | None = None
+    if tag is not None:
+        normalized_tag = tag.strip().lower()
+        if not _TAG_SLUG_RE.match(normalized_tag):
+            raise ValueError(
+                f"Unsupported tag filter {tag!r}; expected a lowercase slug "
+                "(alphanumeric, '-', '_')."
+            )
+
+    filtered_cases = [
+        c
+        for c in cases
+        if (lang is None or c.lang == lang)
+        and (normalized_tag is None or normalized_tag in c.tags)
+    ]
     if not filtered_cases:
         raise ValueError("No benchmark cases match the requested filters.")
 
