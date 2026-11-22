@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from optcg_knowledge.ingest import HashEmbedder
+from optcg_knowledge.ingest import HashEmbedder, embed_chunks
 from optcg_knowledge.search import build_fts_queries, detect_query_tokens, hybrid_search
+from tests.conftest import insert_test_ruling
 
 
 def test_detect_query_tokens_extracts_card_ids_rule_ids_and_keywords() -> None:
@@ -186,3 +187,175 @@ def test_lexical_fallback_when_no_embedder_supplied(
     assert res["search_mode"] == "lexical_only"
     assert res["results"][0]["doc_id"] == "OP05-119"
     assert "vector" not in res["results"][0]["match_signals"]
+
+
+def test_keyword_query_without_card_id_prioritizes_canonical_rule_over_card_faqs(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+) -> None:
+    """Conceptual [Keyword] queries without a card_id must rank authority=1 rules first."""
+    _, conn, embedder = populated_db
+
+    # Add multiple card-specific official FAQs mentioning [Blocker] with question-like wording.
+    for idx in range(3):
+        insert_test_ruling(
+            conn,
+            ruling_id=f"faq:blocker:noise-{idx}",
+            question=(
+                "How does [Blocker] activate during the Block Step on OP04-083 Sabo "
+                "when blocking an attack?"
+            ),
+            answer=(
+                "[Blocker] activates by resting OP04-083 during the Block Step to change "
+                "the attack target to this Character."
+            ),
+            source="official_faq",
+            authority=2,
+            date="2025-09-10",
+            rules_version="1.24",
+            reviewed=True,
+            card_ids=["OP04-083"],
+        )
+    embed_chunks(conn, embedder, batch_size=8)
+
+    # Conceptual query (no card_id): canonical Comprehensive Rule defining [Blocker] ranks #1.
+    conceptual = hybrid_search(
+        conn,
+        "How does [Blocker] activate during the Block Step?",
+        embedder=embedder,
+        k=6,
+    )
+    assert conceptual["results"][0]["doc_type"] == "rule"
+    assert conceptual["results"][0]["authority"] == 1
+    assert conceptual["results"][0]["doc_id"] in {"10-1-1", "7-1-2-1"}
+    assert "exact_keyword" in conceptual["results"][0]["match_signals"]
+
+    # Card-specific query (explicit card_id): card stays #1 and its linked FAQ ranks right behind.
+    card_specific = hybrid_search(
+        conn,
+        "OP04-083 [Blocker] Block Step",
+        embedder=embedder,
+        k=6,
+    )
+    assert card_specific["results"][0]["doc_type"] == "card"
+    assert card_specific["results"][0]["doc_id"] == "OP04-083"
+    assert card_specific["results"][1]["doc_type"] == "ruling"
+    assert card_specific["results"][1]["doc_id"].startswith("faq:blocker:noise-")
+
+
+def test_relaxed_fts_strips_bilingual_stopwords_without_breaking_strict_queries() -> None:
+    strict_pt, relaxed_pt = build_fts_queries(
+        "Qual é a regra no Tournament Rules Manual para Slow Play (jogo lento)?"
+    )
+    assert strict_pt is not None
+    assert '"Qual"' in strict_pt
+    assert '"a"' in strict_pt
+    assert relaxed_pt is not None
+    for stopword in ('"Qual"', '"é"', '"a"', '"no"', '"para"'):
+        assert stopword not in relaxed_pt
+    for kept in ('"Tournament"', '"Rules"', '"Manual"', '"Slow"', '"Play"', '"regra"'):
+        assert kept in relaxed_pt
+
+    # Structured tokens and bracketed keywords are always preserved in relaxed fallback.
+    _, relaxed_kw = build_fts_queries("Como funciona o [Blocker] na regra 7-1-2-1?")
+    assert relaxed_kw is not None
+    assert '"[Blocker]"' in relaxed_kw
+    assert '"7-1-2-1"' in relaxed_kw
+    assert '"o"' not in relaxed_kw
+
+    # All-stopword queries fall back safely rather than returning empty/crashing.
+    strict_ops, relaxed_ops = build_fts_queries("NOT OR AND NEAR")
+    assert strict_ops == '"NOT" AND "OR" AND "AND" AND "NEAR"'
+    assert relaxed_ops is not None
+
+
+def test_hybrid_downweights_noisy_relaxed_bm25_against_strong_vector_match(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+) -> None:
+    """When strict AND misses on a PT-BR query, noisy OR BM25 must not beat a top-1 vector hit."""
+    _, conn, _ = populated_db
+
+    # Find the exact vector stored for rule 7-1-4-1-1-1 so a deterministic stub embedder
+    # returns it as vec_rank=1 for a PT-BR query that only hits relaxed OR on other chunks.
+    row = conn.execute(
+        "SELECT c.rowid, v.embedding FROM chunks c JOIN chunks_vec v ON v.rowid = c.rowid "
+        "WHERE c.doc_type = 'rule' AND c.doc_id = '7-1-4-1-1-1'"
+    ).fetchone()
+    assert row is not None
+
+    import struct
+
+    target_vec = list(struct.unpack("<64f", row["embedding"]))
+
+    class _FixedVectorEmbedder:
+        model_name = "test/hash-embedder"
+        dimension = 64
+
+        def embed_passages(self, texts: list[str]) -> list[list[float]]:
+            return [target_vec for _ in texts]
+
+        def embed_query(self, query: str) -> list[float]:
+            return target_vec
+
+    # Query mixes Portuguese prose ("quando o jogador tem") with generic English word "Attack"
+    # so strict AND returns 0 rows and relaxed OR boosts Attack Step / Block Step chunks instead.
+    res = hybrid_search(
+        conn,
+        "Quando o jogador recebe dano com Attack e zero vidas?",
+        embedder=_FixedVectorEmbedder(),
+        k=5,
+    )
+    assert res["search_mode"] == "hybrid"
+    assert res["results"][0]["doc_id"] == "7-1-4-1-1-1"
+    assert "vector" in res["results"][0]["match_signals"]
+
+
+def test_authority_and_judge_tier_hierarchy_preserved_strictly(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+) -> None:
+    """Authority (2 > 3 > 4) and judge tiers (tier_0 > tier_2 > tier_1) must hold strictly."""
+    _, conn, embedder = populated_db
+
+    shared_q = "How does simultaneous trigger priority resolve during End Phase?"
+    shared_a = "Turn player resolves simultaneous effects before the non-turn player."
+    specs = [
+        ("community:prio:1", "community", 4, None),
+        ("judge:prio:t1", "judge", 3, "tier_1"),
+        ("judge:prio:t2", "judge", 3, "tier_2"),
+        ("judge:prio:t0", "judge", 3, "tier_0"),
+        ("faq:prio:official", "official_faq", 2, None),
+    ]
+    for rid, source, auth, tier in specs:
+        insert_test_ruling(
+            conn,
+            ruling_id=rid,
+            question=shared_q,
+            answer=shared_a,
+            source=source,
+            authority=auth,
+            date="2025-09-15",
+            rules_version="1.24",
+            reviewed=True,
+        )
+        if tier is not None:
+            with conn:
+                conn.execute(
+                    "UPDATE rulings SET judge_tier = ? WHERE ruling_id = ?",
+                    (tier, rid),
+                )
+    embed_chunks(conn, embedder, batch_size=8)
+
+    res = hybrid_search(
+        conn,
+        "simultaneous trigger priority resolve End Phase",
+        embedder=embedder,
+        doc_types=["ruling"],
+        k=10,
+    )
+    ordered_ids = [r["doc_id"] for r in res["results"] if ":prio:" in r["doc_id"]]
+    assert ordered_ids == [
+        "faq:prio:official",
+        "judge:prio:t0",
+        "judge:prio:t2",
+        "judge:prio:t1",
+        "community:prio:1",
+    ]
