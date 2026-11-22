@@ -16,10 +16,12 @@ from optcg_knowledge.ingest import (
     HashEmbedder,
     embed_chunks,
     ingest_banlist,
+    ingest_cards,
     ingest_trm,
     parse_banlist_json,
     parse_trm_text,
 )
+from optcg_knowledge.ingest.sources import LocalCardSource
 from optcg_knowledge.mcp import create_server
 from optcg_knowledge.search.queries import MAX_BATCH_CARDS_PAGE_SIZE, get_cards, search_cards
 
@@ -1022,3 +1024,183 @@ def test_mcp_block_icon_surfacing_and_search_cards_filtering_zero_stdout_leak(
         search_cards(conn, min_block=0)
     with pytest.raises(ValueError, match="min_block must be a positive integer"):
         search_cards(conn, min_block=False)  # type: ignore[arg-type]
+
+
+def test_mcp_card_max_copies_overrides_and_leaders_zero_stdout_leak(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, embedder = populated_db
+    unlimited_cards_path = tmp_path / "unlimited_cards.json"
+    unlimited_cards_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "OP01-075",
+                    "name": "Pacifista",
+                    "rarity": "Common",
+                    "block_number": 1,
+                    "category": "Character",
+                    "colors": ["Blue"],
+                    "cost": 4,
+                    "power": 5000,
+                    "attributes": ["Special"],
+                    "types": ["Navy"],
+                    "effect": (
+                        "Under the rules of this game, you may have any number of this card "
+                        "in your deck. [Blocker]"
+                    ),
+                },
+                {
+                    "id": "OP08-072",
+                    "name": "Biscuit Warrior",
+                    "rarity": "Common",
+                    "block_number": 2,
+                    "category": "Character",
+                    "colors": ["Purple"],
+                    "cost": 4,
+                    "power": 5000,
+                    "attributes": ["Slash"],
+                    "types": ["Big Mom Pirates"],
+                    "effect": (
+                        "Under the rules of this game, you may have any number of this card "
+                        "in your deck. [Blocker]"
+                    ),
+                },
+                {
+                    "id": "OP16-042",
+                    "name": "Prisoner of Impel Down",
+                    "rarity": "Common",
+                    "block_number": 4,
+                    "category": "Character",
+                    "colors": ["Blue"],
+                    "cost": 2,
+                    "power": 3000,
+                    "attributes": ["Strike"],
+                    "types": ["Impel Down"],
+                    "effect": (
+                        "Under the rules of this game, you may have any number of this card "
+                        "in your deck."
+                    ),
+                },
+                {
+                    "id": "OP18-093",
+                    "name": "Sleeptids",
+                    "rarity": "Common",
+                    "block_number": 4,
+                    "category": "Character",
+                    "colors": ["Black"],
+                    "cost": 3,
+                    "power": 4000,
+                    "attributes": ["Special"],
+                    "types": ["Animal"],
+                    "effect": (
+                        "Under the rules of this game, you may have any number of this card "
+                        "in your deck. [Blocker]"
+                    ),
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    ingest_cards(conn, LocalCardSource(unlimited_cards_path))
+
+    banlist_doc, _ = parse_banlist_json(
+        {
+            "effective_date": "2026-10-12",
+            "restrictions": [
+                {"card_id": "OP01-075", "ban_status": "banned"},
+                {"card_id": "OP08-072", "ban_status": "restricted"},
+            ],
+            "banned_pairs": [["OP16-042", "OP01-001"]],
+        }
+    )
+    ingest_banlist(conn, banlist_doc)
+
+    server = create_server(db_path=db_path, embedder=embedder)
+
+    async def _run() -> dict[str, Any]:
+        card_legal_unlimited = _extract_json_payload(
+            await server.call_tool("get_card", {"id_or_name": "OP18-093"})
+        )
+        card_legal_leader = _extract_json_payload(
+            await server.call_tool("get_card", {"id_or_name": "ST10-001"})
+        )
+        batch_all = _extract_json_payload(
+            await server.call_tool(
+                "get_cards",
+                {
+                    "card_ids": [
+                        "OP01-075",
+                        "OP08-072",
+                        "OP16-042",
+                        "OP18-093",
+                        "OP01-001",
+                        "ST10-001",
+                    ]
+                },
+            )
+        )
+        search_unlimited = _extract_json_payload(
+            await server.call_tool(
+                "search_cards",
+                {"keyword": "any number of this card in your deck"},
+            )
+        )
+        res_op18 = _extract_resource_json(await server.read_resource("optcg://cards/OP18-093"))
+        res_op01 = _extract_resource_json(await server.read_resource("optcg://cards/OP01-075"))
+        res_op08 = _extract_resource_json(await server.read_resource("optcg://cards/OP08-072"))
+        res_op16 = _extract_resource_json(await server.read_resource("optcg://cards/OP16-042"))
+        res_leader = _extract_resource_json(await server.read_resource("optcg://cards/ST10-001"))
+        res_banlist = _extract_resource_json(await server.read_resource("optcg://banlist"))
+        return {
+            "card_legal_unlimited": card_legal_unlimited,
+            "card_legal_leader": card_legal_leader,
+            "batch_all": batch_all,
+            "search_unlimited": search_unlimited,
+            "res_op18": res_op18,
+            "res_op01": res_op01,
+            "res_op08": res_op08,
+            "res_op16": res_op16,
+            "res_leader": res_leader,
+            "res_banlist": res_banlist,
+        }
+
+    out = asyncio.run(_run())
+    assert capsys.readouterr().out == ""
+
+    assert out["card_legal_unlimited"]["cards"][0]["max_copies"] == 50
+    assert out["card_legal_leader"]["cards"][0]["max_copies"] == 1
+
+    batch_max = {c["card_id"]: c["max_copies"] for c in out["batch_all"]["cards"]}
+    assert batch_max == {
+        "OP01-075": 0,
+        "OP08-072": 1,
+        "OP16-042": 50,
+        "OP18-093": 50,
+        "OP01-001": 1,
+        "ST10-001": 1,
+    }
+
+    search_max = {c["card_id"]: c["max_copies"] for c in out["search_unlimited"]["cards"]}
+    assert search_max == {
+        "OP01-075": 0,
+        "OP08-072": 1,
+        "OP16-042": 50,
+        "OP18-093": 50,
+    }
+
+    # MCP resources match tool contracts.
+    assert out["res_op18"]["cards"][0]["max_copies"] == 50
+    assert out["res_op01"]["cards"][0]["max_copies"] == 0
+    assert out["res_op08"]["cards"][0]["max_copies"] == 1
+    assert out["res_op16"]["cards"][0]["max_copies"] == 50
+    assert out["res_leader"]["cards"][0]["max_copies"] == 1
+    banlist_max = {r["card_id"]: r["max_copies"] for r in out["res_banlist"]["restrictions"]}
+    assert banlist_max == {
+        "OP01-075": 0,
+        "OP08-072": 1,
+        "OP01-001": 1,
+        "OP16-042": 50,
+    }

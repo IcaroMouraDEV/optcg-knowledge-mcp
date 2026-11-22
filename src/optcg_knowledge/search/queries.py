@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from difflib import SequenceMatcher
 from typing import Any
 
-from optcg_knowledge.db.models import MAX_COPIES_BY_BAN_STATUS, normalize_ban_status
+from optcg_knowledge.db.models import normalize_ban_status, resolve_card_max_copies
 from optcg_knowledge.db.schema import get_meta
 from optcg_knowledge.ingest.trm_parser import TRM_ID_PREFIX, normalize_trm_section_id
 
@@ -181,12 +181,21 @@ def _banlist_meta(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def _serialize_upcoming_restriction(
     restriction: sqlite3.Row | None,
+    *,
+    category: str | None = None,
+    effect_text: str | None = None,
 ) -> dict[str, Any] | None:
     if restriction is None:
         return None
+    ban_status = str(restriction["ban_status"])
     return {
-        "ban_status": str(restriction["ban_status"]),
-        "max_copies": int(restriction["max_copies"]),
+        "ban_status": ban_status,
+        "max_copies": resolve_card_max_copies(
+            ban_status,
+            category=category,
+            effect_text=effect_text,
+            restricted_max_copies=int(restriction["max_copies"]),
+        ),
         "paired_card_ids": _parse_json_list(restriction["paired_card_ids"]),
         "restriction_note": (
             str(restriction["restriction_note"])
@@ -219,9 +228,17 @@ def _serialize_card_row(
     restriction: sqlite3.Row | None = None,
     upcoming_restriction: sqlite3.Row | None = None,
 ) -> dict[str, Any]:
+    category = str(row["category"])
+    effect_text = str(row["effect_text"]) if row["effect_text"] is not None else None
+
     if restriction is not None:
         ban_status = str(restriction["ban_status"])
-        max_copies = int(restriction["max_copies"])
+        max_copies = resolve_card_max_copies(
+            ban_status,
+            category=category,
+            effect_text=effect_text,
+            restricted_max_copies=int(restriction["max_copies"]),
+        )
         paired_card_ids = _parse_json_list(restriction["paired_card_ids"])
         restriction_note = (
             str(restriction["restriction_note"])
@@ -235,7 +252,11 @@ def _serialize_card_row(
         )
     else:
         ban_status = "legal"
-        max_copies = MAX_COPIES_BY_BAN_STATUS["legal"]
+        max_copies = resolve_card_max_copies(
+            ban_status,
+            category=category,
+            effect_text=effect_text,
+        )
         paired_card_ids = []
         restriction_note = None
         effective_date = None
@@ -244,7 +265,7 @@ def _serialize_card_row(
         "card_id": str(row["card_id"]),
         "name": str(row["name"]),
         "set_code": str(row["set_code"]),
-        "category": str(row["category"]),
+        "category": category,
         "colors": _parse_json_list(row["colors"]),
         "cost": int(row["cost"]) if row["cost"] is not None else None,
         "life": int(row["life"]) if row["life"] is not None else None,
@@ -252,7 +273,7 @@ def _serialize_card_row(
         "counter": int(row["counter"]) if row["counter"] is not None else None,
         "attributes": _parse_json_list(row["attributes"]),
         "traits": _parse_json_list(row["traits"]),
-        "effect_text": str(row["effect_text"]) if row["effect_text"] is not None else None,
+        "effect_text": effect_text,
         "trigger_text": str(row["trigger_text"]) if row["trigger_text"] is not None else None,
         "rarity": str(row["rarity"]) if row["rarity"] is not None else None,
         "block_icon": _optional_row_int(row, "block_icon"),
@@ -263,7 +284,11 @@ def _serialize_card_row(
         "paired_card_ids": paired_card_ids,
         "restriction_note": restriction_note,
         "effective_date": effective_date,
-        "upcoming_restriction": _serialize_upcoming_restriction(upcoming_restriction),
+        "upcoming_restriction": _serialize_upcoming_restriction(
+            upcoming_restriction,
+            category=category,
+            effect_text=effect_text,
+        ),
     }
 
 
@@ -772,6 +797,7 @@ def _query_banlist_scope(
             c.set_code,
             c.category,
             c.colors,
+            c.effect_text,
             {block_select}
         FROM card_restrictions cr
         LEFT JOIN cards c ON c.card_id = cr.card_id
@@ -803,19 +829,28 @@ def _query_banlist_scope(
             if a != b:
                 pair_set.add((a, b))
 
+        card_category = str(row["category"]) if row["category"] is not None else None
+        card_effect_text = str(row["effect_text"]) if row["effect_text"] is not None else None
+        effective_max_copies = resolve_card_max_copies(
+            status,
+            category=card_category,
+            effect_text=card_effect_text,
+            restricted_max_copies=int(row["max_copies"]),
+        )
+
         restrictions.append(
             {
                 "card_id": cid,
                 "card_found": row["card_name"] is not None,
                 "name": str(row["card_name"]) if row["card_name"] is not None else None,
                 "set_code": str(row["set_code"]) if row["set_code"] is not None else None,
-                "category": str(row["category"]) if row["category"] is not None else None,
+                "category": card_category,
                 "colors": _parse_json_list(row["colors"]),
                 "block_icon": (
                     int(row["block_icon"]) if row["block_icon"] is not None else None
                 ),
                 "ban_status": status,
-                "max_copies": int(row["max_copies"]),
+                "max_copies": effective_max_copies,
                 "paired_card_ids": paired,
                 "restriction_note": (
                     str(row["restriction_note"]) if row["restriction_note"] is not None else None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -27,6 +28,17 @@ MAX_COPIES_BY_BAN_STATUS: dict[BanStatus, int] = {
     "restricted": 1,
     "pair_banned": 4,
 }
+
+# Comprehensive Rules 5-1-2: 1 Leader card + 50-card main deck.
+LEADER_MAX_COPIES = 1
+MAX_MAIN_DECK_COPIES = 50
+
+# Comprehensive Rules 5-1-2-4 canonical unlimited-copy deck construction clause.
+_UNLIMITED_DECK_COPIES_RE = re.compile(
+    r"\bunder\s+the\s+rules\s+of\s+this\s+game\s*,\s*"
+    r"you\s+may\s+have\s+any\s+number\s+of\s+this\s+card\s+in\s+your\s+deck\b",
+    re.IGNORECASE,
+)
 
 AUTHORITY_BY_SOURCE: dict[SourceType, AuthorityLevel] = {
     "rules": 1,
@@ -116,6 +128,45 @@ def normalize_ban_status(status: str) -> BanStatus:
         valid = ", ".join(VALID_BAN_STATUSES)
         raise ValueError(f"Unknown ban_status {status!r}; expected one of: {valid}")
     return normalized
+
+
+def has_unlimited_copies_rule(effect_text: str | None) -> bool:
+    """Return True when card text carries the canonical CR 5-1-2-4 unlimited-copy clause."""
+    if not effect_text:
+        return False
+    return _UNLIMITED_DECK_COPIES_RE.search(effect_text) is not None
+
+
+def resolve_card_max_copies(
+    ban_status: str,
+    *,
+    category: str | None = None,
+    effect_text: str | None = None,
+    restricted_max_copies: int | None = None,
+) -> int:
+    """Compute effective max_copies combining banlist status and CR 5-1-2 deck rules.
+
+    Precedence:
+    1. ``banned`` -> ``0`` and ``restricted`` -> ``1`` (or explicit cap) override card text.
+    2. ``Leader`` cards -> ``1`` (CR 5-1-2) when ``legal`` or ``pair_banned``.
+    3. Cards with the canonical unlimited-copy rule (CR 5-1-2-4) -> ``50`` when ``legal``
+       or ``pair_banned``.
+    4. Otherwise ``restricted_max_copies`` (when provided) or ``4``.
+    """
+    normalized_status = normalize_ban_status(ban_status)
+    if normalized_status == "banned":
+        return 0
+    if normalized_status == "restricted":
+        if restricted_max_copies is not None:
+            return restricted_max_copies
+        return MAX_COPIES_BY_BAN_STATUS["restricted"]
+    if category is not None and category.strip().lower() == "leader":
+        return LEADER_MAX_COPIES
+    if has_unlimited_copies_rule(effect_text):
+        return MAX_MAIN_DECK_COPIES
+    if restricted_max_copies is not None:
+        return restricted_max_copies
+    return MAX_COPIES_BY_BAN_STATUS[normalized_status]
 
 
 @dataclass(frozen=True, slots=True)
