@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -108,7 +109,7 @@ def test_tracked_benchmark_dataset_is_valid_bilingual_and_pii_free() -> None:
     dataset = load_eval_dataset(DEFAULT_EVAL_DATASET_PATH)
 
     assert dataset.schema_version == EVAL_SCHEMA_VERSION
-    assert 20 <= len(dataset.cases) <= 40
+    assert 40 <= len(dataset.cases) <= 60
 
     langs = {case.lang for case in dataset.cases}
     categories = {case.category for case in dataset.cases}
@@ -117,8 +118,66 @@ def test_tracked_benchmark_dataset_is_valid_bilingual_and_pii_free() -> None:
 
     pt_count = sum(1 for c in dataset.cases if c.lang == "pt-BR")
     en_count = sum(1 for c in dataset.cases if c.lang == "en")
-    assert pt_count >= 10
-    assert en_count >= 10
+    assert pt_count >= 25
+    assert en_count >= 15
+
+    pure_pt_cases = [c for c in dataset.cases if "pure-pt-br" in c.tags]
+    assert len(pure_pt_cases) == 15
+    assert {c.lang for c in pure_pt_cases} == {"pt-BR"}
+    assert {"rules", "trm"}.issubset({c.category for c in pure_pt_cases})
+
+    # Guardrail: pure-pt-br slice must not rely on bracketed keywords or English OPTCG anglicisms.
+    forbidden_en_terms = re.compile(
+        r"\[[^\]]+\]|\b("
+        r"leader|life|character|don!!|counter step|block step|damage step|draw phase|"
+        r"main phase|slow play|intentional draw|head judge|trash|trigger|banish|rush|"
+        r"double attack|blocker|replacement|instead|loop|tournament rules manual"
+        r")\b",
+        re.IGNORECASE,
+    )
+    for case in pure_pt_cases:
+        assert case.authority_checks, f"{case.case_id} missing authority_checks"
+        assert not forbidden_en_terms.search(case.query), (
+            f"{case.case_id} contains forbidden English OPTCG term: {case.query!r}"
+        )
+
+
+def test_parse_eval_dataset_validates_and_normalizes_tags() -> None:
+    parsed = parse_eval_dataset(
+        {
+            "schema_version": "1.0",
+            "name": "tag-test",
+            "cases": [
+                {
+                    "case_id": "t1",
+                    "lang": "pt-BR",
+                    "category": "rules",
+                    "tags": [" Pure-PT-BR ", "pure-pt-br", "core_rules"],
+                    "query": "Como funciona a regra de bloqueio?",
+                    "expected_targets": [{"doc_type": "rule", "doc_id": "10-1-4"}],
+                }
+            ],
+        }
+    )
+    assert parsed.cases[0].tags == ("pure-pt-br", "core_rules")
+
+    with pytest.raises(EvalDatasetError, match="lowercase slug"):
+        parse_eval_dataset(
+            {
+                "schema_version": "1.0",
+                "name": "bad-tag",
+                "cases": [
+                    {
+                        "case_id": "t-bad",
+                        "lang": "pt-BR",
+                        "category": "rules",
+                        "tags": ["bad tag!"],
+                        "query": "Pergunta teste",
+                        "expected_targets": [{"doc_type": "rule", "doc_id": "10-1-4"}],
+                    }
+                ],
+            }
+        )
 
 
 def test_eval_target_prefix_matching_rules_trm_and_rulings() -> None:
@@ -329,3 +388,108 @@ def test_cli_eval_lexical_json_and_threshold_gate(
     assert rc_fail == 1
     captured_fail = capsys.readouterr()
     assert "Gate failed" in captured_fail.err
+
+
+def test_eval_by_tag_aggregation_and_cli_tag_filter(
+    populated_db: tuple[Path, sqlite3.Connection, HashEmbedder],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path, conn, _ = populated_db
+    tagged_cases = [
+        EvalCase(
+            case_id="tagged-card-en",
+            lang="en",
+            category="cards",
+            query="OP05-119",
+            expected_targets=(EvalTarget(doc_type="card", doc_id="OP05-119"),),
+            tags=("card-exact",),
+        ),
+        EvalCase(
+            case_id="tagged-rule-pt",
+            lang="pt-BR",
+            category="rules",
+            query="Regra 7-1-4-1 Damage Step",
+            expected_targets=(EvalTarget(doc_type="rule", doc_id="7-1-4-1"),),
+            tags=("pure-pt-br",),
+        ),
+    ]
+
+    full_report = run_retrieval_eval(conn, tagged_cases, mode="lexical", k=8)
+    lex_summary = full_report.modes["lexical"]
+    assert set(lex_summary.by_tag.keys()) == {"card-exact", "pure-pt-br"}
+    assert lex_summary.by_tag["pure-pt-br"].cases_total == 1
+    assert "tag=pure-pt-br" in full_report.format_text()
+
+    filtered_report = run_retrieval_eval(
+        conn, tagged_cases, mode="lexical", k=8, tag="pure-pt-br"
+    )
+    assert filtered_report.modes["lexical"].metrics.cases_total == 1
+    assert filtered_report.modes["lexical"].cases[0].case_id == "tagged-rule-pt"
+
+    with pytest.raises(ValueError, match="Unsupported tag filter"):
+        run_retrieval_eval(conn, tagged_cases, mode="lexical", k=8, tag="invalid tag!")
+
+    dataset_path = tmp_path / "tagged_eval.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "name": "cli-tagged-eval",
+                "cases": [
+                    {
+                        "case_id": "cli-t1",
+                        "lang": "en",
+                        "category": "cards",
+                        "tags": ["card-exact"],
+                        "query": "OP05-119",
+                        "expected_targets": [{"doc_type": "card", "doc_id": "OP05-119"}],
+                    },
+                    {
+                        "case_id": "cli-t2",
+                        "lang": "pt-BR",
+                        "category": "rules",
+                        "tags": ["pure-pt-br"],
+                        "query": "Regra 7-1-4-1 Damage Step",
+                        "expected_targets": [{"doc_type": "rule", "doc_id": "7-1-4-1"}],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli_main(
+        [
+            "--db",
+            str(db_path),
+            "eval",
+            "--dataset",
+            str(dataset_path),
+            "--mode",
+            "lexical",
+            "--tag",
+            "pure-pt-br",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["modes"]["lexical"]["metrics"]["cases_total"] == 1
+    assert list(payload["modes"]["lexical"]["by_tag"].keys()) == ["pure-pt-br"]
+
+    rc_missing = cli_main(
+        [
+            "--db",
+            str(db_path),
+            "eval",
+            "--dataset",
+            str(dataset_path),
+            "--mode",
+            "lexical",
+            "--tag",
+            "nonexistent-tag",
+        ]
+    )
+    assert rc_missing == 1
+    assert "No benchmark cases match" in capsys.readouterr().err

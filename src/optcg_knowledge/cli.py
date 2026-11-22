@@ -694,6 +694,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter benchmark cases by language (default: all).",
     )
     eval_parser.add_argument(
+        "--tag",
+        default=None,
+        help="Filter benchmark cases by optional tag (e.g., pure-pt-br).",
+    )
+    eval_parser.add_argument(
         "--device",
         default=None,
         help="Device for local embeddings in hybrid mode: auto, cuda, cpu (default: auto).",
@@ -1152,6 +1157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     embedder=eval_embedder,
                     k=args.k,
                     lang=lang_filter,
+                    tag=args.tag,
                     dataset_name=dataset.name,
                     dataset_path=args.dataset,
                 )

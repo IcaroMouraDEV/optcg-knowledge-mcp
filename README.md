@@ -284,8 +284,9 @@ uv run optcg-ingest --db data/optcg.db --embedding-model intfloat/multilingual-e
 # Lexical-only run (works without installing the optional [embeddings] extra)
 uv run optcg-ingest eval --mode lexical
 
-# Filter by language or export machine-readable JSON for tuning diffs
+# Filter by language or tag, or export machine-readable JSON for tuning diffs
 uv run optcg-ingest eval --lang pt-BR --json --out eval_report.json
+uv run optcg-ingest eval --tag pure-pt-br --verbose-cases
 ```
 
 Optional regression gates (`--min-recall3`, `--min-mrr`, `--fail-on-authority`) return exit code `1` when a threshold is missed.

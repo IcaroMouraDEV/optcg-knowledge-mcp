@@ -362,6 +362,203 @@
       "authority_checks": [
         {"type": "top_k_max_authority", "k": 5, "max_authority": 2}
       ]
+    },
+    {
+      "case_id": "pure-pt-leader-zero-life-win",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "O que acontece quando o ataque tem poder igual ou maior contra um líder que já está sem cartas de vida?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "7-1-4-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-summoning-sickness",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Um personagem que acabou de ser jogado em campo pode atacar no mesmo turno ou precisa esperar o próximo turno?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "3-7-4"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-first-turn-draw-and-resources",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "No primeiro turno da partida, quem começa jogando compra carta na fase de compra e quantas cartas de recurso coloca em campo?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "6-3-1"},
+        {"doc_type": "rule", "doc_id": "6-4-1"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-simultaneous-effects-order",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Quando efeitos do jogador ativo e do oponente são acionados ao mesmo tempo, qual deles resolve primeiro?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "8-6", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-replacement-effects",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Como funcionam efeitos de substituição que dizem em vez disso quando mais de um efeito pode se aplicar ao mesmo evento?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "8-1-3-4", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-infinite-cycle",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "O que acontece na partida se surgir uma repetição infinita de efeitos que nenhum dos dois jogadores consegue interromper?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "11-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-deck-size-and-copy-limit",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Quantas cartas o baralho principal precisa ter e qual é o limite máximo de cópias iguais permitidas na montagem do baralho?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "5-1-2", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-card-text-overrides-rules",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Quando o texto de uma carta contradiz o manual de regras gerais, qual dos dois prevalece?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "1-3-1", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-block-redirect-attack",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Como funciona a habilidade de bloquear e redirecionar um ataque para outro personagem, e posso fazer isso mais de uma vez na mesma batalha?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-4", "match_prefix": true},
+        {"doc_type": "rule", "doc_id": "7-1-2", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-double-damage",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Como funciona a habilidade que faz um único ataque causar dois de dano na vida do líder adversário?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-2", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-trash-life-no-effect",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Como funciona a habilidade que manda a carta de vida do oponente direto para o descarte sem ativar nenhum efeito dela?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-3", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-optional-life-activation",
+      "lang": "pt-BR",
+      "category": "rules",
+      "tags": ["pure-pt-br"],
+      "query": "Ao sofrer dano e revelar uma carta de vida com efeito especial, sou obrigado a ativar ou posso apenas colocá-la na minha mão?",
+      "expected_targets": [
+        {"doc_type": "rule", "doc_id": "10-1-5", "match_prefix": true}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-trm-slow-play",
+      "lang": "pt-BR",
+      "category": "trm",
+      "tags": ["pure-pt-br"],
+      "query": "Qual é a penalidade em torneios oficiais quando um jogador demora demais nas jogadas ou enrola o relógio?",
+      "expected_targets": [
+        {"doc_type": "tournament_rule", "doc_id": "TRM-7.4.2.3"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-trm-intentional-draw",
+      "lang": "pt-BR",
+      "category": "trm",
+      "tags": ["pure-pt-br"],
+      "query": "Em torneios oficiais, os jogadores têm permissão para combinar um empate intencional em uma rodada?",
+      "expected_targets": [
+        {"doc_type": "tournament_rule", "doc_id": "TRM-4.18"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
+    },
+    {
+      "case_id": "pure-pt-trm-judge-appeal",
+      "lang": "pt-BR",
+      "category": "trm",
+      "tags": ["pure-pt-br"],
+      "query": "Como funciona o pedido de recurso quando um jogador discorda da decisão de um juiz e quer chamar o juiz chefe do torneio?",
+      "expected_targets": [
+        {"doc_type": "tournament_rule", "doc_id": "TRM-4.14"}
+      ],
+      "authority_checks": [
+        {"type": "top_k_max_authority", "k": 3, "max_authority": 1}
+      ]
     }
   ]
 }
