@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 # Matches standard OPTCG card IDs: OP05-119, ST10-001, EB01-001, PRB01-001, P-001
@@ -138,6 +139,161 @@ _RELAXED_FTS_STOPWORDS: frozenset[str] = frozenset(
     }
 )
 
+# Compact, deterministic PT-BR -> canonical English OPTCG phrase glossary used ONLY
+# to expand relaxed (OR) FTS5 fallback queries so pure Portuguese queries can still hit
+# English Comprehensive Rules and TRM sections when local embeddings are absent.
+# Keys are accent-folded lowercase phrases; zero external APIs or LLMs are used.
+_PTBR_PHRASE_GLOSSARY: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("fase de renovacao", ("Refresh Phase",)),
+    ("fase de compra", ("Draw Phase",)),
+    ("fase principal", ("Main Phase",)),
+    ("fase final", ("End Phase",)),
+    ("passo de ataque", ("Attack Step",)),
+    ("passo de bloqueio", ("Block Step",)),
+    ("passo de contra ataque", ("Counter Step",)),
+    ("passo de dano", ("Damage Step",)),
+    ("carta de recurso", ("DON!!",)),
+    ("cartas de recurso", ("DON!!",)),
+    ("baralho de recurso", ("DON!! deck",)),
+    ("baralho de recursos", ("DON!! deck",)),
+    ("carta de vida", ("Life card", "Life")),
+    ("cartas de vida", ("Life card", "Life")),
+    ("sem cartas de vida", ("0 Life",)),
+    ("zero de vida", ("0 Life",)),
+    ("0 de vida", ("0 Life",)),
+    ("igual ou maior", ("greater than or equal",)),
+    ("maior ou igual", ("greater than or equal",)),
+    ("ataque duplo", ("Double Attack",)),
+    ("dois de dano", ("Double Attack",)),
+    ("em vez disso", ("instead", "replacement")),
+    ("efeito de substituicao", ("replacement effects", "instead")),
+    ("efeitos de substituicao", ("replacement effects", "instead")),
+    ("repeticao infinita", ("infinite loop",)),
+    ("ciclo infinito", ("infinite loop",)),
+    ("loop infinito", ("infinite loop",)),
+    ("empate intencional", ("Intentional Draws", "Intentional Draw")),
+    ("empates intencionais", ("Intentional Draws", "Intentional Draw")),
+    ("juiz chefe", ("Head Judge",)),
+    ("pedido de recurso", ("Appeals", "appeal")),
+    ("pedir recurso", ("Appeals", "appeal")),
+    ("jogo lento", ("Slow Play",)),
+    ("demora demais", ("Slow Play",)),
+    ("enrola o relogio", ("Slow Play",)),
+    ("jogador ativo", ("turn player",)),
+    ("jogador do turno", ("turn player",)),
+    ("ao mesmo tempo", ("same time",)),
+    ("manual de regras", ("Comprehensive Rules",)),
+    ("regras gerais", ("Comprehensive Rules",)),
+    ("texto da carta", ("card text",)),
+    ("texto de uma carta", ("card text",)),
+    ("baralho principal", ("50-card deck", "deck")),
+    ("montagem do baralho", ("deck", "Leader")),
+    ("copias iguais", ("same card number", "copies")),
+    ("primeiro turno", ("first turn",)),
+    ("sem ativar", ("without activating",)),
+)
+
+# Single-word PT-BR -> OPTCG EN domain vocabulary for relaxed FTS5 fallback.
+# Keys are accent-folded Portuguese words chosen to avoid collisions with English terms
+# and to omit ultra-high-frequency corpus boilerplate ("card", "effect", "rules",
+# "tournament", "penalty", "play") that would dilute FTS5 BM25 precision.
+# Polysemous words like "recurso" (DON!! vs judge appeal) are intentionally handled
+# only via multi-word phrases above.
+_PTBR_TERM_GLOSSARY: dict[str, tuple[str, ...]] = {
+    "lider": ("Leader",),
+    "lideres": ("Leader",),
+    "personagem": ("Character",),
+    "personagens": ("Character",),
+    "evento": ("Event",),
+    "eventos": ("Event",),
+    "estagio": ("Stage",),
+    "estagios": ("Stage",),
+    "vida": ("Life",),
+    "vidas": ("Life",),
+    "descarte": ("trash",),
+    "descartar": ("trash",),
+    "descartado": ("trash",),
+    "descartada": ("trash",),
+    "cemiterio": ("trash",),
+    "baralho": ("deck",),
+    "baralhos": ("deck",),
+    "mao": ("hand",),
+    "turno": ("turn",),
+    "turnos": ("turn",),
+    "ataque": ("attack",),
+    "atacar": ("attack",),
+    "atacante": ("attack",),
+    "ataca": ("attack",),
+    "batalha": ("battle",),
+    "batalhar": ("battle",),
+    "dano": ("damage",),
+    "danos": ("damage",),
+    "poder": ("power",),
+    "bloquear": ("Blocker", "block"),
+    "bloqueador": ("Blocker", "block"),
+    "bloqueio": ("Blocker", "block"),
+    "bloqueia": ("Blocker", "block"),
+    "redirecionar": ("Blocker", "target"),
+    "substituicao": ("replacement", "instead"),
+    "substituir": ("replacement", "instead"),
+    "substitui": ("replacement", "instead"),
+    "compra": ("draw",),
+    "comprar": ("draw",),
+    "comprando": ("draw",),
+    "jogado": ("played",),
+    "jogada": ("played",),
+    "jogar": ("played",),
+    "ativar": ("activate",),
+    "ativacao": ("activate",),
+    "ativado": ("activate",),
+    "acionar": ("activate",),
+    "acionado": ("activate",),
+    "acionados": ("activate",),
+    "copia": ("copies",),
+    "copias": ("copies",),
+    "oponente": ("opponent",),
+    "adversario": ("opponent",),
+    "demora": ("Slow Play",),
+    "enrola": ("Slow Play",),
+    "lento": ("Slow Play",),
+    "apelacao": ("appeal",),
+    "recorrer": ("appeal",),
+    "revelar": ("reveal",),
+    "revelada": ("reveal",),
+    "revelado": ("reveal",),
+    "descansado": ("rested",),
+    "descansada": ("rested",),
+    "virado": ("rested",),
+    "deitado": ("rested",),
+    "custo": ("cost",),
+    "contragolpe": ("Counter",),
+    "banir": ("Banish",),
+    "banimento": ("Banish",),
+    "impeto": ("Rush",),
+    "gatilho": ("Trigger",),
+    "prevalece": ("precedence",),
+    "prevalecer": ("precedence",),
+    "contradiz": ("contradicts",),
+    "contradizer": ("contradicts",),
+    "interromper": ("stop",),
+    "infinita": ("infinite", "loop"),
+    "infinito": ("infinite", "loop"),
+    "simultaneo": ("simultaneous",),
+    "simultanea": ("simultaneous",),
+    "simultaneos": ("simultaneous",),
+    "simultaneas": ("simultaneous",),
+    "habilidade": ("Keyword",),
+    "habilidades": ("Keyword",),
+    "vence": ("wins",),
+    "vencer": ("wins",),
+    "vitoria": ("wins",),
+    "derrota": ("loses",),
+    "perde": ("loses",),
+    "perder": ("loses",),
+}
+
+_FOLD_SPLIT_RE = re.compile(r"[^\w]+", re.UNICODE)
+
 
 @dataclass(frozen=True, slots=True)
 class DetectedTokens:
@@ -241,6 +397,44 @@ def _is_relaxed_stopword(raw_term: str) -> bool:
     return cleaned.lower() in _RELAXED_FTS_STOPWORDS
 
 
+def _fold_ptbr_text(text: str) -> str:
+    """Fold accents and punctuation to ASCII-like lowercase tokens for glossary lookup."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    parts = [part for part in _FOLD_SPLIT_RE.split(stripped.lower()) if part]
+    return " ".join(parts)
+
+
+def _expand_ptbr_glossary_terms(query: str) -> list[str]:
+    """Return canonical English OPTCG terms mapped from PT-BR domain words/phrases."""
+    folded = _fold_ptbr_text(query)
+    if not folded:
+        return []
+
+    padded = f" {folded} "
+    expanded: list[str] = []
+    seen: set[str] = set()
+
+    def _add(term: str) -> None:
+        key = term.lower()
+        if key not in seen:
+            seen.add(key)
+            expanded.append(term)
+
+    for phrase, targets in _PTBR_PHRASE_GLOSSARY:
+        if f" {phrase} " in padded:
+            for target in targets:
+                _add(target)
+
+    for word in folded.split():
+        targets = _PTBR_TERM_GLOSSARY.get(word)
+        if targets is not None:
+            for target in targets:
+                _add(target)
+
+    return expanded
+
+
 def build_fts_queries(query: str) -> tuple[str | None, str | None]:
     """Build crash-safe ``(strict_and, relaxed_or)`` FTS5 MATCH queries from raw user input.
 
@@ -250,7 +444,8 @@ def build_fts_queries(query: str) -> tuple[str | None, str | None]:
 
     ``strict_and`` retains all tokens for exact English/literal precision, while
     ``relaxed_or`` filters ultra-common EN/PT-BR stopwords (falling back to all tokens
-    if filtering would leave none) to reduce noise on mixed-language queries.
+    if filtering would leave none) and appends deterministic PT-BR -> OPTCG EN glossary
+    terms so pure Portuguese queries can still retrieve English rules/TRM in lexical mode.
     """
     if not query or not query.strip():
         return (None, None)
@@ -273,8 +468,22 @@ def build_fts_queries(query: str) -> tuple[str | None, str | None]:
     if not quoted_terms:
         return (None, None)
 
+    glossary_quoted: list[str] = []
+    relaxed_seen = {term.lower() for term in relaxed_terms}
+    for mapped in _expand_ptbr_glossary_terms(query):
+        quoted_mapped = _quote_fts_term(mapped)
+        if quoted_mapped is None:
+            continue
+        key = quoted_mapped.lower()
+        if key not in relaxed_seen:
+            relaxed_seen.add(key)
+            glossary_quoted.append(quoted_mapped)
+
     strict_query = " AND ".join(quoted_terms)
-    if len(quoted_terms) == 1:
+    if glossary_quoted:
+        base_relaxed = relaxed_terms if relaxed_terms else quoted_terms
+        relaxed_query = " OR ".join([*base_relaxed, *glossary_quoted])
+    elif len(quoted_terms) == 1:
         relaxed_query = None
     elif relaxed_terms:
         relaxed_query = " OR ".join(relaxed_terms)
